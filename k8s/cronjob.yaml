@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ai-freelance-copilot-run
+  labels:
+    app: ai-freelance-copilot
+spec:
+  # Daily at 06:00 UTC — one discovery run, drafts queued, digest emailed.
+  schedule: "0 6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 1800
+      template:
+        metadata:
+          labels:
+            app: ai-freelance-copilot
+            component: run
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: run
+              image: ghcr.io/suryaanandan1995-dotcom/ai-freelance-copilot:latest
+              imagePullPolicy: IfNotPresent
+              # NEVER submits — discovers, qualifies, drafts, queues, and emails a digest.
+              command: ["python", "main.py", "run", "--notify"]
+              envFrom:
+                - configMapRef:
+                    name: ai-freelance-copilot-config
+                - secretRef:
+                    name: ai-freelance-copilot-secrets
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "1"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir: {}

@@ -1,0 +1,97 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "schemaVersion": 39,
+  "title": "AI Freelance Copilot",
+  "tags": ["ai-freelance-copilot", "copilot"],
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "1m",
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Leads fetched per day",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(copilot_leads_fetched_total[1d])",
+          "legendFormat": "fetched",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(copilot_leads_qualified_total[1d])",
+          "legendFormat": "qualified",
+          "refId": "B"
+        },
+        {
+          "expr": "increase(copilot_proposals_drafted_total[1d])",
+          "legendFormat": "drafted",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Fit score (p50 / p90)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "max": 100 }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(copilot_fit_score_bucket[1h])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum(rate(copilot_fit_score_bucket[1h])) by (le))",
+          "legendFormat": "p90",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Win rate",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "green", "value": 0.25 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "copilot_proposals_won_total / clamp_min(copilot_proposals_won_total + copilot_proposals_lost_total, 1)",
+          "legendFormat": "win rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Claude cost (USD)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "increase(copilot_claude_cost_usd_total[1d])",
+          "legendFormat": "spend/day",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}AI Freelance Copilot{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg2: #1e293b;
+      --card: #1e293b;
+      --border: #334155;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent2: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header.topbar {
+      background: var(--bg2);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 28px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      flex-wrap: wrap;
+    }
+    header.topbar .brand { font-weight: 700; font-size: 18px; color: var(--text); }
+    header.topbar .brand span { color: var(--accent); }
+    header.topbar nav { display: flex; gap: 18px; }
+    header.topbar nav a { color: var(--muted); font-size: 14px; }
+    header.topbar nav a:hover { color: var(--text); text-decoration: none; }
+    header.topbar .counts { margin-left: auto; display: flex; gap: 14px; flex-wrap: wrap; }
+    .pill {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .pill b { color: var(--text); }
+    main { max-width: 1100px; margin: 0 auto; padding: 28px; }
+    h1 { font-size: 22px; margin: 0 0 18px; }
+    h2 { font-size: 17px; margin: 22px 0 10px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      margin-bottom: 16px;
+    }
+    .muted { color: var(--muted); font-size: 13px; }
+    .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .badge {
+      display: inline-block;
+      min-width: 38px;
+      text-align: center;
+      font-weight: 700;
+      font-size: 13px;
+      border-radius: 8px;
+      padding: 3px 8px;
+      color: #0f172a;
+    }
+    .score-high { background: var(--accent2); }
+    .score-mid { background: var(--accent); }
+    .score-low { background: var(--muted); }
+    .chip {
+      display: inline-block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 12px;
+      color: var(--accent2);
+      margin: 2px 4px 2px 0;
+    }
+    .tag {
+      display: inline-block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 11px;
+      color: var(--muted);
+      margin: 2px 4px 2px 0;
+    }
+    .lead-list a.lead-item {
+      display: block;
+      color: inherit;
+      text-decoration: none;
+    }
+    .lead-list a.lead-item:hover .card { border-color: var(--accent); }
+    .lead-title { font-weight: 600; font-size: 15px; color: var(--text); }
+    button, .btn {
+      display: inline-block;
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    button:hover, .btn:hover { border-color: var(--accent); text-decoration: none; }
+    .btn-accent { background: var(--accent); color: #0f172a; border-color: var(--accent); font-weight: 600; }
+    .btn-accent2 { background: var(--accent2); color: #0f172a; border-color: var(--accent2); font-weight: 600; }
+    .btn-danger { color: #fca5a5; border-color: #7f1d1d; }
+    input[type=text], textarea, select {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 12px;
+      font-size: 14px;
+      font-family: inherit;
+    }
+    textarea { min-height: 220px; resize: vertical; line-height: 1.55; }
+    label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 6px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    .actions form { margin: 0; }
+    .note {
+      background: rgba(56, 189, 248, 0.08);
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 12px 14px;
+      color: var(--text);
+      font-size: 13px;
+      margin: 16px 0;
+    }
+    .board { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+    .col-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+    .col-head .count { color: var(--accent); font-weight: 700; }
+    .mini { font-size: 13px; padding: 8px 10px; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">AI Freelance <span>Copilot</span></div>
+    <nav>
+      <a href="/">Inbox</a>
+      <a href="/pipeline">Pipeline</a>
+      <a href="/content">Content</a>
+    </nav>
+    {% if counts is defined and counts %}
+    <div class="counts">
+      {% for status, n in counts.items() %}
+        <span class="pill">{{ status }} <b>{{ n }}</b></span>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

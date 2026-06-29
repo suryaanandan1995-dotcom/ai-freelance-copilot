@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ lead.title }} — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <p class="muted"><a href="/">&larr; Back to inbox</a></p>
+  <h1>
+    {% set s = lead.fit_score %}
+    <span class="badge {{ 'score-high' if s >= 85 else ('score-mid' if s >= 70 else 'score-low') }}">{{ s }}</span>
+    {{ lead.title }}
+  </h1>
+
+  <div class="card">
+    <div class="muted">
+      <strong style="color:var(--text);">{{ lead.company or "Unknown company" }}</strong>
+      &middot; via {{ lead.source }} &middot; status: {{ lead.status }}
+      {% if lead.budget %}&middot; budget: {{ lead.budget }}{% endif %}
+      {% if lead.posted_at %}&middot; posted: {{ lead.posted_at }}{% endif %}
+    </div>
+    {% if lead.tags %}
+      <div style="margin-top:10px;">
+        {% for tag in lead.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+      </div>
+    {% endif %}
+    {% if lead.description %}
+      <p class="muted" style="margin-top:12px; white-space:pre-wrap;">{{ lead.description }}</p>
+    {% endif %}
+    {% if lead.url %}
+      <div style="margin-top:12px;">
+        <a class="btn" href="{{ lead.url }}" target="_blank" rel="noopener">Open original job &nearr;</a>
+      </div>
+    {% endif %}
+  </div>
+
+  <div class="note">
+    Review &amp; submit on the platform yourself — auto-submitting violates platform ToS.
+  </div>
+
+  <div class="card">
+    <h2>Proposal draft</h2>
+    {% if proposal and proposal.cited_projects %}
+      <div style="margin-bottom:10px;">
+        {% for proj in proposal.cited_projects %}<span class="chip">{{ proj }}</span>{% endfor %}
+      </div>
+    {% endif %}
+    <form method="post" action="/lead/{{ lead.id }}/proposal">
+      <label for="body">Proposal body (editable)</label>
+      <textarea id="body" name="body">{{ proposal.body if proposal else "" }}</textarea>
+      <label for="suggested_rate">Suggested rate</label>
+      <input type="text" id="suggested_rate" name="suggested_rate"
+             value="{{ proposal.suggested_rate if proposal else "" }}">
+      <div class="actions">
+        <button type="submit" class="btn">Save edits</button>
+      </div>
+    </form>
+
+    <div class="actions">
+      <form method="post" action="/lead/{{ lead.id }}/approve"><button type="submit" class="btn-accent">Approve</button></form>
+      <form method="post" action="/lead/{{ lead.id }}/submitted"><button type="submit" class="btn">Mark submitted</button></form>
+      <form method="post" action="/lead/{{ lead.id }}/reject"><button type="submit" class="btn-danger">Reject</button></form>
+      <form method="post" action="/lead/{{ lead.id }}/won"><button type="submit" class="btn-accent2">Won &#127881;</button></form>
+      <form method="post" action="/lead/{{ lead.id }}/lost"><button type="submit" class="btn-danger">Lost</button></form>
+    </div>
+    <p class="muted" style="margin-top:10px;">Won / Lost feed the learning loop — wins grow the proposal knowledge base.</p>
+  </div>
+{% endblock %}

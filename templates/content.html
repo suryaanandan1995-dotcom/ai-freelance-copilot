@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Content Engine — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Inbound Content Engine</h1>
+  <p class="muted">Generate marketing drafts grounded in your portfolio. Drafts only — you review and post.</p>
+
+  <div class="card">
+    <form method="post" action="/content/generate">
+      <label for="kind">Kind</label>
+      <select id="kind" name="kind">
+        <option value="post" {{ "selected" if selected_kind == "post" else "" }}>LinkedIn post</option>
+        <option value="case-study" {{ "selected" if selected_kind in ("case-study", "case_study") else "" }}>Case study</option>
+        <option value="gig" {{ "selected" if selected_kind == "gig" else "" }}>Productized gig</option>
+      </select>
+      <label for="topic">Topic (optional)</label>
+      <input type="text" id="topic" name="topic" value="{{ topic or "" }}"
+             placeholder="e.g. Kubernetes security, cutting cloud spend">
+      <div class="actions">
+        <button type="submit" class="btn-accent">Generate draft</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="note">
+    Drafts only — a human posts. Auto-posting to LinkedIn / Fiverr / Upwork violates platform ToS and risks an account ban.
+  </div>
+
+  {% if draft %}
+  <div class="card">
+    <h2>{{ draft.title }}</h2>
+    <label for="draft-body">Draft (copy &amp; paste)</label>
+    <textarea id="draft-body" readonly onclick="this.select()">{{ draft.body }}</textarea>
+    {% if draft.sources %}
+      <label>Sources cited</label>
+      <div>
+        {% for src in draft.sources %}{% if src %}<span class="chip">{{ src }}</span>{% endif %}{% endfor %}
+      </div>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endblock %}

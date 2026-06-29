@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Pipeline — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Pipeline</h1>
+  <p class="muted">Every lead grouped by status.</p>
+  <div class="board">
+    {% for status in statuses %}
+      {% set items = board.get(status, []) %}
+      <div>
+        <div class="col-head">
+          <span style="text-transform:capitalize;">{{ status }}</span>
+          <span class="count">{{ items|length }}</span>
+        </div>
+        {% for lead in items %}
+          <a class="lead-item" href="/lead/{{ lead.id }}">
+            <div class="card mini">
+              <div class="row" style="gap:8px;">
+                {% set s = lead.fit_score %}
+                <span class="badge {{ 'score-high' if s >= 85 else ('score-mid' if s >= 70 else 'score-low') }}">{{ s }}</span>
+                <span style="color:var(--text);">{{ lead.title }}</span>
+              </div>
+              <div class="muted" style="margin-top:4px;">{{ lead.company or lead.source }}</div>
+            </div>
+          </a>
+        {% else %}
+          <div class="muted mini">—</div>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  </div>
+{% endblock %}

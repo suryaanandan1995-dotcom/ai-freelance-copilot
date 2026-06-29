@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Inbox — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Inbox — proposals awaiting your review</h1>
+  <p class="muted">Drafted &amp; approved leads, highest fit first. Review, edit, and submit on the platform yourself.</p>
+
+  {% if leads %}
+  <div class="lead-list">
+    {% for lead in leads %}
+      <a class="lead-item" href="/lead/{{ lead.id }}">
+        <div class="card">
+          <div class="row">
+            {% set s = lead.fit_score %}
+            <span class="badge {{ 'score-high' if s >= 85 else ('score-mid' if s >= 70 else 'score-low') }}">{{ s }}</span>
+            <span class="lead-title">{{ lead.title }}</span>
+            <span class="tag">{{ lead.status }}</span>
+          </div>
+          <div class="muted" style="margin-top:6px;">
+            {{ lead.company or "Unknown company" }} &middot; via {{ lead.source }}
+          </div>
+        </div>
+      </a>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="card muted">No drafted or approved leads yet. Run the pipeline to populate the inbox.</div>
+  {% endif %}
+{% endblock %}

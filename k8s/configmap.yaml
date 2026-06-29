@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-freelance-copilot-config
+  labels:
+    app: ai-freelance-copilot
+data:
+  # Non-secret configuration. Secrets (API keys, SMTP password, WhatsApp token)
+  # live in the Secret (see secret.example.yaml).
+  COPILOT_NOTIFY_CHANNEL: "email"
+  COPILOT_DASHBOARD_BASE_URL: "http://ai-freelance-copilot"
+  COPILOT_MODEL_OPUS: "claude-opus-4-8"
+  COPILOT_MODEL_SONNET: "claude-sonnet-4-6"
+  COPILOT_MIN_FIT_SCORE: "70"
+  COPILOT_MAX_LEADS_PER_RUN: "50"
+  COPILOT_MAX_PROPOSALS_PER_DAY: "15"
+  COPILOT_MAX_USD_PER_RUN: "2.0"
+  COPILOT_DRY_RUN: "true"
+  COPILOT_ALLOW_SEND: "false"
+  COPILOT_RAG_STORE_PATH: "data/portfolio_kb.json"
+  COPILOT_OWNER_NAME: "Surya A"
+  COPILOT_OWNER_EMAIL: "suryaanandan1995@gmail.com"
+  COPILOT_SMTP_PORT: "587"

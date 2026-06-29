@@ -1,0 +1,17 @@
+# Prometheus Operator ServiceMonitor — scrapes the dashboard's /metrics endpoint.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ai-freelance-copilot
+  labels:
+    app: ai-freelance-copilot
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: ai-freelance-copilot
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
