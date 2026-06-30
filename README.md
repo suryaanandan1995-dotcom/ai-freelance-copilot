@@ -208,7 +208,7 @@ kubectl apply -f k8s/configmap.yaml
 cp k8s/secret.example.yaml k8s/secret.yaml   # fill in real values, do not commit
 kubectl apply -f k8s/secret.yaml
 kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
-kubectl apply -f k8s/cronjob.yaml             # daily `python main.py run --notify`
+kubectl apply -f k8s/cronjob.yaml             # Mon–Fri `python main.py run --notify`
 kubectl apply -f k8s/servicemonitor.yaml      # Prometheus scrape of /metrics
 ```
 
