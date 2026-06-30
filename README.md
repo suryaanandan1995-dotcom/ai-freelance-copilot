@@ -212,7 +212,7 @@ kubectl apply -f k8s/cronjob.yaml             # daily `python main.py run --noti
 kubectl apply -f k8s/servicemonitor.yaml      # Prometheus scrape of /metrics
 ```
 
-The **Deployment** serves the always-on approval dashboard; the **CronJob** runs the daily discovery pass and emails a digest. Both run read-only-rootfs, non-root, with all capabilities dropped.
+The **Deployment** serves the always-on approval dashboard; the **CronJob** runs the weekday (Mon–Fri) discovery pass and emails a digest. Both run read-only-rootfs, non-root, with all capabilities dropped.
 
 ## CI/CD
 
