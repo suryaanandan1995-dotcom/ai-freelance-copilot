@@ -62,6 +62,11 @@ class _MeteredChat:
         result = self._inner.invoke(messages)
         if tracker is not None:
             in_tok, out_tok = _extract_usage(result)
+            if in_tok == 0 and out_tok == 0:
+                # Structured-output calls don't expose usage; estimate (~4 chars/token)
+                # so the per-run budget cap still accounts for cheap Sonnet calls.
+                in_tok = len(str(messages)) // 4
+                out_tok = 256
             tracker.record(self._model, in_tok, out_tok)
             try:
                 from observability import metrics

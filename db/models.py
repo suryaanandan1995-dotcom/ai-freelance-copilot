@@ -46,6 +46,22 @@ def _utcnow() -> _dt.datetime:
     return _dt.datetime.now(_dt.UTC)
 
 
+class OutreachRecord(Base):
+    """One auto-sent cold email. The UNIQUE email enforces never-email-twice
+    dedupe across runs (critical for the unattended cloud schedule)."""
+
+    __tablename__ = "outreach"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    lead_id: Mapped[int | None] = mapped_column(
+        ForeignKey("leads.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    status: Mapped[str] = mapped_column(String(32), default="sent")  # sent | suppressed | failed
+    sent_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class LeadRecord(Base):
     __tablename__ = "leads"
     __table_args__ = (UniqueConstraint("source", "external_id", name="uq_source_external"),)

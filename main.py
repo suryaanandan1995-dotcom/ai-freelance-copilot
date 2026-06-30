@@ -20,7 +20,9 @@ import sys
 def _cmd_run(args: argparse.Namespace) -> int:
     from pipeline import run_pipeline
 
-    stats = run_pipeline(limit=args.limit, notify=args.notify)
+    stats = run_pipeline(
+        limit=args.limit, notify=args.notify, auto_email=args.auto_email
+    )
     try:
         from rich import print as rprint
 
@@ -96,6 +98,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Run one pipeline pass (discover/qualify/draft).")
     p_run.add_argument("--limit", type=int, default=None, help="Max leads to process.")
     p_run.add_argument("--notify", action="store_true", help="Send a digest after the run.")
+    p_run.add_argument(
+        "--auto-email",
+        action="store_true",
+        help=(
+            "Auto-send a short cold email to queued, email-reachable, strong-fit "
+            "leads (deduped, rate-limited, opt-out). Still gated by COPILOT_AUTO_EMAIL "
+            "+ SMTP config; no-op otherwise. Never submits to Upwork/LinkedIn."
+        ),
+    )
     p_run.set_defaults(func=_cmd_run)
 
     p_dash = sub.add_parser("dashboard", help="Serve the human approval dashboard.")

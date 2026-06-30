@@ -37,16 +37,105 @@ def _proposals_today(session: Any) -> int:
     )
 
 
+def _emails_today(session: Any) -> int:
+    """Count outreach emails actually sent since UTC midnight (daily cap)."""
+    from db.models import OutreachRecord
+
+    return (
+        session.query(OutreachRecord)
+        .filter(
+            OutreachRecord.sent_at >= _today_start(),
+            OutreachRecord.status == "sent",
+        )
+        .count()
+    )
+
+
+def _maybe_email_lead(
+    *,
+    lead: Any,
+    scored_state: dict,
+    research_state: dict,
+    fit_score: int,
+    lead_db_id: int | None,
+    settings: Any,
+    retriever: Any,
+    chat: Any,
+) -> str:
+    """Attempt one cold email for a freshly queued lead.
+
+    Returns ``"sent"`` on a successful send, otherwise a short skip-reason string
+    (e.g. ``"no_email"``, ``"low_fit"``, ``"duplicate"``, ``"suppressed"``,
+    ``"daily_cap"``, ``"send_failed"``). All guards (gate, fit, dedupe,
+    suppression, daily cap) are enforced here. Never raises for control flow.
+    """
+    from db.models import OutreachRecord
+    from outreach.extract import find_contact_email
+    from outreach.pitch import draft_email
+    from outreach.sender import send_outreach
+    from outreach.suppression import is_suppressed
+
+    email = find_contact_email(lead)
+    if not email:
+        return "no_email"
+    if fit_score < settings.outreach_min_fit:
+        return "low_fit"
+    if is_suppressed(email):
+        return "suppressed"
+
+    with get_session() as session:
+        already = (
+            session.query(OutreachRecord.id)
+            .filter(OutreachRecord.email == email)
+            .first()
+        )
+        if already is not None:
+            return "duplicate"
+        if _emails_today(session) >= settings.max_emails_per_day:
+            return "daily_cap"
+
+    from core.schemas import CompanyResearch, ScoredLead
+
+    scored = ScoredLead(**scored_state) if scored_state else None
+    if scored is None:
+        return "no_score"
+    research = CompanyResearch(**research_state) if research_state else CompanyResearch()
+
+    draft = draft_email(scored, research, retriever=retriever, chat=chat)
+    sent = send_outreach(email, draft["subject"], draft["body"])
+
+    with get_session() as session:
+        session.add(
+            OutreachRecord(
+                lead_id=lead_db_id,
+                email=email,
+                subject=draft["subject"],
+                status="sent" if sent else "failed",
+            )
+        )
+    return "sent" if sent else "send_failed"
+
+
 def run_pipeline(
     limit: int | None = None,
     sources: list | None = None,
     retriever: Any = None,
     chat: Any = None,
     notify: bool = False,
+    auto_email: bool = False,
 ) -> dict:
     """Run one end-to-end pipeline pass and return run statistics.
 
-    Returns ``{fetched, new, queued, dropped, skipped, cost_usd, budget_exhausted}``.
+    Returns ``{fetched, new, queued, dropped, skipped, cost_usd, budget_exhausted,
+    emailed, emailed_skipped}``.
+
+    When ``auto_email`` is True, each freshly queued lead that exposes a public
+    contact email AND clears ``outreach_min_fit`` is sent a single short cold
+    intro email — deduped against ``OutreachRecord`` (never emailed twice),
+    suppression-list aware, and capped at ``max_emails_per_day``. This is the
+    ONLY auto-send path; Upwork/LinkedIn submission stays human-only. The actual
+    send is itself gated by ``settings.auto_email`` + SMTP config in the sender,
+    so passing ``auto_email=True`` here is safe by default.
     """
     settings = get_settings()
     init_db()
@@ -58,8 +147,13 @@ def run_pipeline(
     set_cost_tracker(tracker)
 
     fetched = new = queued = dropped = skipped = 0
+    emailed = 0
+    emailed_skipped: dict[str, int] = {}
     budget_exhausted = False
     queued_leads: list[dict] = []
+
+    def _skip_email(reason: str) -> None:
+        emailed_skipped[reason] = emailed_skipped.get(reason, 0) + 1
 
     try:
         from agents.graph import run_lead
@@ -152,6 +246,27 @@ def run_pipeline(
             queued_leads.append(
                 {"id": lead_db_id, "title": lead.title, "fit_score": fit_score}
             )
+
+            # --- auto cold-email outreach (email-only; never platform submit) ---
+            if auto_email:
+                try:
+                    result = _maybe_email_lead(
+                        lead=lead,
+                        scored_state=state.get("scored") or {},
+                        research_state=state.get("research") or {},
+                        fit_score=fit_score,
+                        lead_db_id=lead_db_id,
+                        settings=settings,
+                        retriever=retriever,
+                        chat=chat,
+                    )
+                    if result == "sent":
+                        emailed += 1
+                    else:
+                        _skip_email(result)
+                except Exception as exc:  # email must never break the lead loop
+                    logger.warning("auto-email failed for lead %s: %s", lead_db_id, exc)
+                    _skip_email("error")
     finally:
         set_cost_tracker(None)
 
@@ -161,6 +276,8 @@ def run_pipeline(
         "queued": queued,
         "dropped": dropped,
         "skipped": skipped,
+        "emailed": emailed,
+        "emailed_skipped": emailed_skipped,
         "cost_usd": tracker.usd(),
         "budget_exhausted": budget_exhausted,
     }

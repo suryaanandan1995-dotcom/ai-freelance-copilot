@@ -69,8 +69,46 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 |--------|---------------|
 | **Remote boards** | RemoteOK, WeWorkRemotely & Remotive feeds — works out of the box, no config. |
 | **Contra / startup** | Startup-oriented opportunity feeds (configurable via `COPILOT_STARTUP_FEEDS`). |
-| **HN "Who is hiring"** | The monthly Hacker News hiring thread (public Algolia API). |
+| **HN "Who is hiring"** | The monthly Hacker News hiring thread (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. |
 | **Upwork RSS** *(optional)* | Upwork **discontinued public RSS on 2024-08-20**, so this is off by default. Set `COPILOT_UPWORK_FEEDS` only if you have a third-party RSS bridge; otherwise use Upwork's native saved-search alerts and bid manually. The adapter returns nothing (no error) when unconfigured. |
+
+> Most board listings (Upwork, LinkedIn, remote boards) link back to a platform and expose **no direct email**, so they stay human-submit. Hacker News "Who is hiring" comments are the exception — and the only place the auto-email channel sends to.
+
+## Auto-Email Outreach
+
+The proposal pipeline is **draft-and-queue for a human** because auto-submitting to Upwork/LinkedIn violates their ToS. But there is **one** channel that is safe to fully automate: **sending a plain email from your own address** to someone who *publicly posted a contact address looking to hire*. That is not a platform ToS violation, and it is the basis of the auto-email outreach subsystem ([`outreach/`](outreach/)).
+
+It is **off by default** and deliberately low-volume. Enable it with `--auto-email` on the `run` command:
+
+```bash
+python main.py run --auto-email --notify
+```
+
+For each freshly **queued, strong-fit** lead, it:
+
+1. **Extracts a contact email** ([`outreach/extract.py`](outreach/extract.py)) from the lead description / raw fields — rejecting `noreply@`, `@example.`, asset/error domains, etc. In practice this only ever fires on HN "Who is hiring" posts; board listings expose no address and are skipped.
+2. **Drafts a short (110–150 word) human cold-intro email** with Opus ([`outreach/pitch.py`](outreach/pitch.py)) — first line specific to their post, one cited portfolio project, at most one quantified win, a soft CTA to the booking link, signed with real identity.
+3. **Sends it** over your SMTP ([`outreach/sender.py`](outreach/sender.py)) and records an `OutreachRecord`.
+
+**Every guardrail is on by default:**
+
+- **Master gate** — nothing sends unless `COPILOT_AUTO_EMAIL=true` *and* `COPILOT_SMTP_HOST` is set. The sender is a hard no-op otherwise, so the default config can never email anyone.
+- **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **80**) are contacted.
+- **Daily cap** — at most `COPILOT_MAX_EMAILS_PER_DAY` (default **8**) sends per UTC day. Low volume protects reply quality, domain reputation, and legality.
+- **Dedupe** — the `outreach` table has a **UNIQUE** email column; an address is **never emailed twice**, across runs.
+- **Suppression list** — `data/suppressed.txt` (one lowercased email per line) is honored before every send. Drop an address in there to permanently stop emailing it.
+- **Opt-out footer** — every email always carries a plain-text identity + opt-out line (`Reply 'unsubscribe' …`) and a `Reply-To` to `COPILOT_OPT_OUT_MAILBOX`.
+
+**Legality.** This is B2B outreach to people who *published a hiring contact* — a textbook **legitimate-interest** basis under UK **PECR**/GDPR and consistent with CAN-SPAM: a real sender identity, a real reply address, an easy opt-out, no deception, and low volume by design. It is **not** scraped bulk marketing. Upwork/LinkedIn proposals stay human-submit — this channel is **email only** and never touches a platform API.
+
+> Stats from a run include `emailed` and an `emailed_skipped` breakdown (`no_email`, `low_fit`, `duplicate`, `suppressed`, `daily_cap`) so you can see exactly why each lead was or wasn't contacted.
+
+### Deploying the schedule
+
+Outreach runs unattended, so the **dedupe/cap state must persist between runs** — otherwise the `outreach` table resets and you could re-email people. Two supported ways:
+
+1. **System cron on an always-on box** with a **persistent SQLite file** (or the Kubernetes CronJob). The DB lives on disk and survives across runs, so dedupe works out of the box. Add `--auto-email` to the scheduled command and set the env vars.
+2. **GitHub Actions** ([`.github/workflows/outreach.yml`](.github/workflows/outreach.yml)) — runners are **ephemeral**, so you **must** point `COPILOT_DATABASE_URL` at a **persistent hosted Postgres**. Without it the dedupe table is thrown away every run. The workflow runs weekdays 06:00 UTC (plus manual dispatch), with a `concurrency` group so runs never overlap, and reads `COPILOT_ANTHROPIC_API_KEY`, `COPILOT_SMTP_*`, `COPILOT_AUTO_EMAIL`, and `COPILOT_DATABASE_URL` from repo secrets.
 
 ## Cost Guardrail
 
@@ -119,6 +157,7 @@ ai-freelance-copilot/
 │   ├── compliance.py           # deterministic review gate
 │   └── followup.py             # polite nudge drafts
 ├── sources/                    # read-only lead adapters + registry
+├── outreach/                   # auto-email channel: extract → pitch → send (gated, deduped, opt-out)
 ├── rag/                        # embedder, vector store, retriever, ingest, learning loop
 ├── db/                         # SQLAlchemy models + session
 ├── observability/metrics.py    # Prometheus metrics (no-op if absent)
@@ -133,7 +172,7 @@ ai-freelance-copilot/
 ├── docs/architecture.drawio
 ├── tests/                      # offline test suite (no API key, no network)
 ├── Dockerfile · Makefile · requirements.txt · pyproject.toml
-└── .github/workflows/ci.yml
+└── .github/workflows/            # ci.yml · outreach.yml (scheduled auto-email)
 ```
 
 ## Prerequisites
@@ -213,6 +252,8 @@ kubectl apply -f k8s/servicemonitor.yaml      # Prometheus scrape of /metrics
 ```
 
 The **Deployment** serves the always-on approval dashboard; the **CronJob** runs the weekday (Mon–Fri) discovery pass and emails a digest. Both run read-only-rootfs, non-root, with all capabilities dropped.
+
+**Scheduled auto-email outreach.** To run the [auto-email channel](#auto-email-outreach) on a schedule, add `--auto-email` to the recurring command (`python main.py run --auto-email --notify`) and set `COPILOT_AUTO_EMAIL=true` + SMTP creds. Because dedupe/cap state must survive across runs, use a **persistent SQLite file** (cron/Kubernetes CronJob on an always-on box) or a **persistent hosted Postgres `COPILOT_DATABASE_URL`** (GitHub Actions [`outreach.yml`](.github/workflows/outreach.yml), since its runners are ephemeral).
 
 ## CI/CD
 

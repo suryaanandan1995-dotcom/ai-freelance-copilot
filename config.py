@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     dry_run: bool = True
     allow_send: bool = False  # auto-send is a ToS violation on Upwork/LinkedIn
 
+    # --- auto cold-email outreach (the only channel safe to fully automate) ---
+    # Sending email from your own address is NOT a platform ToS violation. Emails
+    # go ONLY to leads that publicly posted a contact address looking to hire
+    # (B2B legitimate interest), are rate-limited, deduped, and carry an opt-out.
+    auto_email: bool = False        # master gate — nothing sends unless this is True AND SMTP is set
+    max_emails_per_day: int = 8     # conservative cap (reply quality + domain reputation + legality)
+    outreach_min_fit: int = 80      # only email strong-fit leads
+    opt_out_mailbox: str = ""       # where "unsubscribe" replies go (defaults to owner_email)
+
     # --- identity (used in proposals/signature) ---
     owner_name: str = "Surya A"
     owner_email: str = "suryaanandan1995@gmail.com"

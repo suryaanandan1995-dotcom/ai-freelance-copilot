@@ -1,0 +1,58 @@
+name: Outreach
+
+# Scheduled auto-email outreach. This is the ONLY auto-send channel and it is
+# email-only (sent from your own address; B2B legitimate interest; rate-limited;
+# deduped; opt-out footer). Upwork/LinkedIn are NEVER submitted automatically.
+#
+# IMPORTANT — persistence: dedupe ("never email an address twice") and the daily
+# cap live in the OutreachRecord table. GitHub Actions runners are ephemeral, so
+# the default SQLite file is thrown away after every run. You MUST point
+# COPILOT_DATABASE_URL at a persistent hosted Postgres, otherwise the dedupe
+# table resets each run and you could re-email people. If you cannot provide a
+# persistent DB, run the schedule on an always-on box with a persistent SQLite
+# file instead (see README "Auto-Email Outreach").
+
+on:
+  schedule:
+    - cron: "0 6 * * 1-5"   # weekdays 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: outreach
+  cancel-in-progress: false
+
+jobs:
+  outreach:
+    name: Send scheduled outreach
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
+      COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
+      COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
+      COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+      COPILOT_AUTO_EMAIL: "true"
+      # REQUIRED for cross-run dedupe — a persistent hosted Postgres DSN. Without
+      # a persistent DATABASE_URL the dedupe table resets each run and could
+      # re-email people.
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build portfolio knowledge base
+        run: python -m scripts.build_kb
+
+      - name: Run outreach pipeline
+        run: python main.py run --auto-email --notify
