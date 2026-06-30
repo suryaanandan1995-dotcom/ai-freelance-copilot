@@ -67,10 +67,10 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 
 | Source | What it reads |
 |--------|---------------|
-| **Upwork RSS** | Public Upwork job-search RSS feeds. |
-| **Remote boards** | Aggregated remote-job board feeds. |
-| **Contra / startup** | Contra and startup-oriented opportunity feeds. |
-| **HN "Who is hiring"** | The monthly Hacker News hiring thread. |
+| **Remote boards** | RemoteOK, WeWorkRemotely & Remotive feeds — works out of the box, no config. |
+| **Contra / startup** | Startup-oriented opportunity feeds (configurable via `COPILOT_STARTUP_FEEDS`). |
+| **HN "Who is hiring"** | The monthly Hacker News hiring thread (public Algolia API). |
+| **Upwork RSS** *(optional)* | Upwork **discontinued public RSS on 2024-08-20**, so this is off by default. Set `COPILOT_UPWORK_FEEDS` only if you have a third-party RSS bridge; otherwise use Upwork's native saved-search alerts and bid manually. The adapter returns nothing (no error) when unconfigured. |
 
 ## Cost Guardrail
 
