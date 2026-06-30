@@ -5,13 +5,15 @@ from typing import Any
 
 from config import get_settings
 from core.schemas import Lead
+from voice import HUMAN_VOICE
 
 from .llm import get_chat
 
 _SYSTEM = (
     "You write short, polite, low-pressure follow-up messages for a freelance "
     "engineer. Keep it under 80 words, friendly and specific to the opportunity, "
-    "and never pushy or guilt-tripping. End with an easy out for the client."
+    "and never pushy or guilt-tripping. End with an easy out for the client.\n\n"
+    + HUMAN_VOICE
 )
 
 

@@ -11,6 +11,7 @@ from typing import Any
 
 from config import get_settings
 from core.schemas import CompanyResearch, ProposalDraft, ScoredLead
+from voice import HUMAN_VOICE
 
 from .llm import get_chat
 
@@ -32,7 +33,7 @@ _SYSTEM = (
     "- Be concise (roughly 120-220 words), warm, and confident — no filler, no "
     "generic flattery.\n"
     "- End with a soft call-to-action inviting a short call at the provided link.\n"
-    "Do not fabricate client details."
+    "Do not fabricate client details.\n\n" + HUMAN_VOICE
 )
 
 

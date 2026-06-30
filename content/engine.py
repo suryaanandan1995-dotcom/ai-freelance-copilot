@@ -91,7 +91,9 @@ def generate(
         retriever = get_retriever()
     proof = retriever.retrieve(query, k=5) or []
 
-    system = _load_prompt(canonical)
+    from voice import HUMAN_VOICE
+
+    system = _load_prompt(canonical) + "\n\n" + HUMAN_VOICE
     user = (
         f"Topic / angle: {topic or '(your strongest DevSecOps story)'}\n"
         f"Quantified wins to weave in where they fit: {', '.join(QUANTIFIED_WINS)}\n\n"
