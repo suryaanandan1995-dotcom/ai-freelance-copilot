@@ -49,7 +49,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # psycopg2-binary so a Postgres COPILOT_DATABASE_URL (cross-run dedupe) works;
+        # harmless when the DB is SQLite.
+        run: pip install -r requirements.txt psycopg2-binary
 
       - name: Build portfolio knowledge base
         run: python -m scripts.build_kb
