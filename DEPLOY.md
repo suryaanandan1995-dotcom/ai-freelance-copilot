@@ -7,6 +7,56 @@ The dashboard is a FastAPI app. Running it on your always-on Linux server gives 
 Everything below is **free**. Run the commands yourself (they start a long-running
 service + expose a URL, so they're yours to authorize).
 
+> ## ⚠️ Host it on a PERSONAL machine/account — never a corporate one
+> **Do NOT deploy this on an employer/corporate machine or network.** A public
+> dashboard + inbound webhook running on corporate infra will be flagged by
+> corporate security and violates most acceptable-use policies. Use a personal
+> free platform (**Render** / **Fly.io**) or a **personal** cloud account you own,
+> off any employer network. And **set `COPILOT_DASHBOARD_PASSWORD`** before you
+> expose the URL — a blank password disables auth and leaves every page public.
+
+---
+
+# Option D — Private dashboard + webhook-only tunnel (most security-clean)
+
+Keep the dashboard **fully private** (bound to `127.0.0.1`, login-gated, viewed via
+SSH tunnel) and expose **only** the cal.com webhook via a short-lived Cloudflare tunnel.
+
+```bash
+# in .env: set a strong COPILOT_DASHBOARD_PASSWORD (+ the usual secrets)
+./deploy/tunnel.sh          # runs dashboard on 127.0.0.1 only + prints an https tunnel URL
+```
+- View the UI yourself:  `ssh -L 8000:localhost:8000 <you>@<host>` → open `http://localhost:8000`.
+- Point cal.com `Booking created` at the printed `https://…/webhooks/cal` (same `COPILOT_CAL_WEBHOOK_SECRET`).
+- The UI never leaves localhost; only the HMAC-verified webhook + `/healthz` are reachable through the tunnel.
+
+> ⚠️ Even a tunnel is outbound traffic from the host — run this on a **personal** machine/VM, not the corporate jumpserver. If you must use the corp box, bring the tunnel up only while testing, then Ctrl-C it.
+
+---
+
+# Option C — Render.com (free, personal HTTPS, recommended)
+
+The fastest way to get a personal HTTPS URL with zero server admin. Render builds
+the repo's `Dockerfile`, runs the `/healthz` healthcheck, and serves the app over
+automatic TLS at `https://<your-app>.onrender.com`. A `render.yaml` Blueprint ships
+in the repo root.
+
+1. Sign up for a **personal** [Render](https://render.com) account (not a work one).
+2. In Render: **New → Blueprint** and connect this GitHub repo (or **New → Web
+   Service** → pick the repo → Runtime: **Docker**). Render reads `render.yaml`.
+3. Render builds the `Dockerfile` and deploys it as a **free** web service.
+4. Set the environment variables (they're declared `sync: false`, so you enter the
+   values in the Render dashboard — nothing secret is committed):
+   `COPILOT_ANTHROPIC_API_KEY`, `COPILOT_DATABASE_URL` (your Neon Postgres URL),
+   `COPILOT_SMTP_HOST` / `COPILOT_SMTP_USER` / `COPILOT_SMTP_PASSWORD`,
+   `COPILOT_CAL_WEBHOOK_SECRET`, and **`COPILOT_DASHBOARD_USER` +
+   `COPILOT_DASHBOARD_PASSWORD`** (set a strong password — this is a public URL).
+5. Render gives you `https://<your-app>.onrender.com`. Point the cal.com webhook at
+   `https://<your-app>.onrender.com/webhooks/cal` with the same secret.
+
+> Free Render web services sleep after inactivity and cold-start on the next
+> request; that's fine for a personal dashboard + webhook receiver.
+
 ---
 
 # Option A — Docker + Nginx (recommended)

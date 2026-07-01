@@ -143,6 +143,8 @@ Everything the system does is visible in one place — and mirrored as MCP tools
 
 Run it: `python main.py dashboard` → `http://localhost:8000`. The same data is exposed to agents via MCP tools: `funnel_stats`, `list_outreach`, `list_conversations`, `run_history`.
 
+**Dashboard authentication.** The UI and every write action are protected by **HTTP Basic auth** (constant-time credential check). Set `COPILOT_DASHBOARD_USER` (default `admin`) and `COPILOT_DASHBOARD_PASSWORD` **before exposing the dashboard on any public URL**. A **blank** `COPILOT_DASHBOARD_PASSWORD` disables auth (convenient for local / SSH-tunnel dev). `/healthz`, `/metrics`, and the HMAC-verified `POST /webhooks/cal` stay open so health checks, Prometheus scrapers, and cal.com keep working. See [`DEPLOY.md`](DEPLOY.md) for a free personal HTTPS deploy on Render.
+
 **Call tracking.** To complete the funnel (emailed → replied → **call booked** → won), add a [cal.com](https://cal.com) webhook for the `BOOKING_CREATED` event pointing at `https://<your-dashboard-host>/webhooks/cal`, and set the shared secret in `COPILOT_CAL_WEBHOOK_SECRET` (the endpoint verifies the `X-Cal-Signature-256` HMAC; leave the secret blank to skip verification in dev). When someone you've emailed books a call, that outreach row is stamped `call_booked_at` and the "Call booked" bar lights up in Analytics. The dashboard must be **publicly reachable** for the webhook to fire — a `localhost` instance won't receive it.
 
 ## Cost Guardrail

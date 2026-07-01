@@ -12,11 +12,13 @@ import hashlib
 import hmac
 import json
 import logging
+import secrets
 from collections.abc import Iterator
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -42,6 +44,47 @@ _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 app = FastAPI(title="AI Freelance Copilot — Dashboard")
+
+# --- HTTP Basic auth -----------------------------------------------------------
+# Protects the UI + write actions before the dashboard is exposed on a public URL.
+# If ``settings.dashboard_password`` is blank, auth is DISABLED (local/SSH-tunnel
+# dev + the offline tests keep working). When it's set, every protected route
+# requires the configured user/password; ``/healthz``, ``/metrics``, and the
+# HMAC-verified ``POST /webhooks/cal`` are intentionally left open. Settings are
+# read per-request so the password can be toggled without restarting the app.
+_basic = HTTPBasic(auto_error=False)
+
+
+def require_auth(
+    credentials: HTTPBasicCredentials | None = Depends(_basic),
+) -> None:
+    """FastAPI dependency enforcing HTTP Basic auth on protected routes.
+
+    A blank ``dashboard_password`` disables auth entirely. Otherwise the username
+    AND password are compared with ``secrets.compare_digest`` (constant time) and
+    a mismatch raises 401 with a ``WWW-Authenticate: Basic`` challenge.
+    """
+    settings = get_settings()
+    password = settings.dashboard_password or ""
+    if not password:  # auth disabled
+        return
+    unauthorized = HTTPException(
+        status_code=401,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Basic"},
+    )
+    if credentials is None:
+        raise unauthorized
+    user_ok = secrets.compare_digest(
+        credentials.username.encode("utf-8"),
+        (settings.dashboard_user or "").encode("utf-8"),
+    )
+    pass_ok = secrets.compare_digest(
+        credentials.password.encode("utf-8"),
+        password.encode("utf-8"),
+    )
+    if not (user_ok and pass_ok):
+        raise unauthorized
 
 
 def _utcnow() -> _dt.datetime:
@@ -71,7 +114,9 @@ def _latest_proposal(lead: LeadRecord) -> ProposalRecord | None:
 
 # --- inbox ---------------------------------------------------------------------
 @app.get("/")
-def inbox(request: Request, db: Session = Depends(get_db)) -> Response:
+def inbox(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     leads = (
         db.query(LeadRecord)
         .filter(LeadRecord.status.in_([LeadStatus.drafted, LeadStatus.approved]))
@@ -84,7 +129,12 @@ def inbox(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @app.get("/lead/{lead_id}")
-def lead_detail(lead_id: int, request: Request, db: Session = Depends(get_db)) -> Response:
+def lead_detail(
+    lead_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_auth),
+) -> Response:
     lead = db.get(LeadRecord, lead_id)
     if lead is None:
         return RedirectResponse("/", status_code=303)
@@ -102,6 +152,7 @@ def save_proposal(
     body: str = Form(""),
     suggested_rate: str = Form(""),
     db: Session = Depends(get_db),
+    _auth: None = Depends(require_auth),
 ) -> RedirectResponse:
     lead = db.get(LeadRecord, lead_id)
     if lead is not None:
@@ -115,7 +166,9 @@ def save_proposal(
 
 
 @app.post("/lead/{lead_id}/approve")
-def approve(lead_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+def approve(
+    lead_id: int, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> RedirectResponse:
     lead = db.get(LeadRecord, lead_id)
     if lead is not None:
         lead.status = LeadStatus.approved
@@ -126,7 +179,9 @@ def approve(lead_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
 
 
 @app.post("/lead/{lead_id}/submitted")
-def mark_submitted(lead_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+def mark_submitted(
+    lead_id: int, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> RedirectResponse:
     lead = db.get(LeadRecord, lead_id)
     if lead is not None:
         lead.status = LeadStatus.submitted
@@ -138,7 +193,9 @@ def mark_submitted(lead_id: int, db: Session = Depends(get_db)) -> RedirectRespo
 
 
 @app.post("/lead/{lead_id}/reject")
-def reject(lead_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
+def reject(
+    lead_id: int, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> RedirectResponse:
     lead = db.get(LeadRecord, lead_id)
     if lead is not None:
         lead.status = LeadStatus.rejected
@@ -146,20 +203,22 @@ def reject(lead_id: int, db: Session = Depends(get_db)) -> RedirectResponse:
 
 
 @app.post("/lead/{lead_id}/won")
-def won(lead_id: int) -> RedirectResponse:
+def won(lead_id: int, _auth: None = Depends(require_auth)) -> RedirectResponse:
     record_outcome(lead_id, won=True)
     return RedirectResponse(f"/lead/{lead_id}", status_code=303)
 
 
 @app.post("/lead/{lead_id}/lost")
-def lost(lead_id: int) -> RedirectResponse:
+def lost(lead_id: int, _auth: None = Depends(require_auth)) -> RedirectResponse:
     record_outcome(lead_id, won=False)
     return RedirectResponse(f"/lead/{lead_id}", status_code=303)
 
 
 # --- pipeline board ------------------------------------------------------------
 @app.get("/pipeline")
-def pipeline(request: Request, db: Session = Depends(get_db)) -> Response:
+def pipeline(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     statuses = [s.value for s in LeadStatus]
     board: dict[str, list[LeadRecord]] = {s: [] for s in statuses}
     for lead in db.query(LeadRecord).order_by(LeadRecord.fit_score.desc()).all():
@@ -173,7 +232,7 @@ def pipeline(request: Request, db: Session = Depends(get_db)) -> Response:
 
 # --- content engine ------------------------------------------------------------
 @app.get("/content")
-def content_get(request: Request) -> Response:
+def content_get(request: Request, _auth: None = Depends(require_auth)) -> Response:
     return templates.TemplateResponse(
         request, "content.html", {"draft": None, "selected_kind": "post", "topic": ""}
     )
@@ -184,6 +243,7 @@ def content_generate(
     request: Request,
     kind: str = Form("post"),
     topic: str = Form(""),
+    _auth: None = Depends(require_auth),
 ) -> Response:
     draft = generate_content(kind, topic or None)
     return templates.TemplateResponse(
@@ -195,7 +255,9 @@ def content_generate(
 
 # --- mission control: outreach / conversations / analytics / runs --------------
 @app.get("/outreach")
-def outreach(request: Request, db: Session = Depends(get_db)) -> Response:
+def outreach(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     return templates.TemplateResponse(
         request,
         "outreach.html",
@@ -204,7 +266,9 @@ def outreach(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @app.get("/conversations")
-def conversations(request: Request, db: Session = Depends(get_db)) -> Response:
+def conversations(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     return templates.TemplateResponse(
         request,
         "conversations.html",
@@ -213,7 +277,9 @@ def conversations(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @app.get("/analytics")
-def analytics_page(request: Request, db: Session = Depends(get_db)) -> Response:
+def analytics_page(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     return templates.TemplateResponse(
         request,
         "analytics.html",
@@ -222,7 +288,9 @@ def analytics_page(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @app.get("/runs")
-def runs(request: Request, db: Session = Depends(get_db)) -> Response:
+def runs(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     return templates.TemplateResponse(
         request,
         "runs.html",
@@ -231,7 +299,9 @@ def runs(request: Request, db: Session = Depends(get_db)) -> Response:
 
 
 @app.get("/strategy")
-def strategy(request: Request, db: Session = Depends(get_db)) -> Response:
+def strategy(
+    request: Request, db: Session = Depends(get_db), _auth: None = Depends(require_auth)
+) -> Response:
     return templates.TemplateResponse(
         request,
         "strategy.html",

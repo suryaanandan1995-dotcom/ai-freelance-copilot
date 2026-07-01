@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # --- alerting ---
     alert_email: str = ""             # where run-failure alerts go (defaults to owner_email)
 
+    # --- dashboard auth (protect the UI before exposing it on any public URL) ---
+    # HTTP Basic over HTTPS. If dashboard_password is blank, auth is DISABLED (fine
+    # for local / SSH-tunnel use) — you MUST set a password before public hosting.
+    dashboard_user: str = "admin"
+    dashboard_password: str = ""
+
     # --- cal.com booking webhook (completes the funnel: emailed -> replied -> call booked -> won) ---
     cal_webhook_secret: str = ""      # HMAC secret from cal.com; blank disables signature checking
 

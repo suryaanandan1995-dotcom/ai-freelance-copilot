@@ -1,0 +1,38 @@
+# Render.com Blueprint — free personal HTTPS hosting for the dashboard.
+#
+# Deploy: sign up with a PERSONAL Render account (NOT a corporate one) ->
+# New -> Blueprint -> connect this GitHub repo. Render builds the Dockerfile,
+# runs the healthcheck at /healthz, and serves the app over automatic HTTPS at
+# https://<service-name>.onrender.com (free TLS cert, no config needed).
+#
+# The env vars below use `sync: false`, so their VALUES are NOT committed here —
+# you set each secret in the Render dashboard after the first deploy.
+#
+# IMPORTANT: set COPILOT_DASHBOARD_PASSWORD before exposing the URL. A blank
+# password disables HTTP Basic auth and leaves every page publicly readable.
+services:
+  - type: web
+    name: ai-freelance-copilot
+    runtime: docker
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: COPILOT_ANTHROPIC_API_KEY
+        sync: false
+      - key: COPILOT_DATABASE_URL
+        sync: false
+      - key: COPILOT_SMTP_HOST
+        sync: false
+      - key: COPILOT_SMTP_USER
+        sync: false
+      - key: COPILOT_SMTP_PASSWORD
+        sync: false
+      - key: COPILOT_CAL_WEBHOOK_SECRET
+        sync: false
+      - key: COPILOT_DASHBOARD_USER
+        sync: false
+      - key: COPILOT_DASHBOARD_PASSWORD
+        sync: false
