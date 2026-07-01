@@ -17,6 +17,7 @@ import smtplib
 from email.message import EmailMessage
 
 from config import get_settings
+from outreach import deliverability
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,7 @@ def send_reply(
         return False
 
     try:
+        subject, body = deliverability.sanitize(subject, body)
         sender = settings.smtp_from or settings.owner_email
         bcc = settings.opt_out_mailbox or settings.owner_email
 
