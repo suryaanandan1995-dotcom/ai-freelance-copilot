@@ -126,6 +126,23 @@ Enable it by setting `COPILOT_AUTO_REPLY=true` plus your SMTP/IMAP creds (IMAP r
 
 > **Still watch your inbox.** This runs *with* you, not instead of you. You're BCC'd on every reply and can jump into any thread at any time — reply directly yourself, and the human touch takes over. The bot deliberately hands off anything about money, scope, or commitment to a call with **you**.
 
+## Dashboard (Mission Control)
+
+Everything the system does is visible in one place — and mirrored as MCP tools so the agents can read the same state (for future self-improvement).
+
+![Dashboard](docs/dashboard.png)
+
+| Page | Shows |
+|------|-------|
+| **Inbox** | Ranked leads with editable proposal drafts + one-click actions |
+| **Pipeline** | Leads grouped by status (drafted → approved → submitted → won/lost) |
+| **Outreach** | Every cold email sent — status, replied?, follow-ups |
+| **Conversations** | Full reply threads (inbound + the agent's auto-replies) |
+| **Analytics** | Funnel (emailed → replied → won), reply rate, Claude cost, emails today |
+| **Runs** | Every workflow run — ok/fail, cost, key stats (failures alert you by email) |
+
+Run it: `python main.py dashboard` → `http://localhost:8000`. The same data is exposed to agents via MCP tools: `funnel_stats`, `list_outreach`, `list_conversations`, `run_history`.
+
 ## Cost Guardrail
 
 Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$2.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
