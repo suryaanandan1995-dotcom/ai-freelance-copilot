@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     # --- cal.com booking webhook (completes the funnel: emailed -> replied -> call booked -> won) ---
     cal_webhook_secret: str = ""      # HMAC secret from cal.com; blank disables signature checking
 
+    # --- autonomous self-optimizer (tunes its own STRATEGY, never its source code) ---
+    # Rotates pitch/subject variants + thresholds, measures reply rate, auto-reverts a
+    # change that hurts. Never edits Python source and never touches safety invariants
+    # (no auto-submit, opt-out, caps, pricing->call are all off-limits to the optimizer).
+    self_optimize: bool = False       # gate
+    optimize_min_samples: int = 20    # need this many contacted-with-known-outcome leads before tuning
+    optimize_revert_drop: float = 0.05  # revert a trial if reply rate falls this much vs baseline
+
     # --- identity (used in proposals/signature) ---
     owner_name: str = "Surya A"
     owner_email: str = "suryaanandan1995@gmail.com"

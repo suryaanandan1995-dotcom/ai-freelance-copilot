@@ -25,6 +25,7 @@ def client(tmp_path, monkeypatch):
         ProposalStatus,
         ReplyRecord,
         RunRecord,
+        StrategyRecord,
     )
 
     db_path = tmp_path / "test.db"
@@ -107,6 +108,19 @@ def client(tmp_path, monkeypatch):
                     snippet="Yes, we overspend on egress.",
                 ),
             ]
+        )
+        s.add(
+            StrategyRecord(
+                version=3,
+                params={
+                    "pitch_variant": "proof_led",
+                    "subject_style": "benefit",
+                    "fit_threshold": 72,
+                },
+                active=True,
+                baseline_reply_rate=0.21,
+                note="tightened targeting after learning loop",
+            )
         )
         s.commit()
         lead_id = lead.id
@@ -295,6 +309,14 @@ def test_cal_webhook_signature_verification(client, monkeypatch):
     )
     assert ok.status_code == 200
     assert ok.json() == {"ok": True, "matched": 1}
+
+
+def test_strategy_page(client):
+    r = client.get("/strategy")
+    assert r.status_code == 200
+    assert "Strategy" in r.text
+    assert "proof_led" in r.text
+    assert "tightened targeting after learning loop" in r.text
 
 
 def test_metrics_and_healthz(client):

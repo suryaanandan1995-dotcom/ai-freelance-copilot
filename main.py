@@ -9,6 +9,7 @@ Subcommands:
     content    Generate inbound content (post / case-study / gig).
     reply      Read prospect replies (IMAP) and respond autonomously (guardrailed).
     followup   Send spaced follow-ups to cold-emailed leads who never replied.
+    optimize   Autonomously tune the outreach strategy (auto-reverts regressions).
 
 Dashboard / content / uvicorn are imported lazily INSIDE their handlers so that
 ``import main`` works even before those sibling modules exist.
@@ -117,6 +118,24 @@ def _cmd_followup(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_optimize(_args: argparse.Namespace) -> int:
+    from runlog import record_run
+
+    def _run() -> dict:
+        from optimizer.optimizer import run_optimizer
+
+        return run_optimizer()
+
+    stats = record_run("optimize", _run)
+    try:
+        from rich import print as rprint
+
+        rprint(stats)
+    except Exception:
+        print(stats)
+    return 0
+
+
 def _cmd_content(args: argparse.Namespace) -> int:
     from content.engine import generate
 
@@ -177,6 +196,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_followup.set_defaults(func=_cmd_followup)
+
+    p_optimize = sub.add_parser(
+        "optimize",
+        help=(
+            "Autonomously tune the outreach STRATEGY (pitch/subject variant + fit "
+            "threshold), measure reply rate, and auto-revert a change that hurts. "
+            "Never edits source or safety invariants. Gated by COPILOT_SELF_OPTIMIZE; "
+            "no-op otherwise."
+        ),
+    )
+    p_optimize.set_defaults(func=_cmd_optimize)
 
     p_content = sub.add_parser("content", help="Generate inbound content.")
     p_content.add_argument(

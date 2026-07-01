@@ -223,6 +223,19 @@ def runs(request: Request, db: Session = Depends(get_db)) -> Response:
     )
 
 
+@app.get("/strategy")
+def strategy(request: Request, db: Session = Depends(get_db)) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "strategy.html",
+        {
+            "current": analytics.current_strategy(),
+            "history": analytics.strategy_history(),
+            "counts": _counts(db),
+        },
+    )
+
+
 # --- cal.com booking webhook ---------------------------------------------------
 def _extract_booking_emails(payload: dict) -> list[str]:
     """Pull attendee email(s) from a cal.com BOOKING_CREATED payload (tolerant)."""

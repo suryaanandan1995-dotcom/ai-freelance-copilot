@@ -11,7 +11,14 @@ import datetime as _dt
 
 from sqlalchemy import func
 
-from db.models import LeadRecord, LeadStatus, OutreachRecord, ReplyRecord, RunRecord
+from db.models import (
+    LeadRecord,
+    LeadStatus,
+    OutreachRecord,
+    ReplyRecord,
+    RunRecord,
+    StrategyRecord,
+)
 from db.session import get_session
 
 
@@ -189,3 +196,52 @@ def conversations() -> list[dict]:
             key=lambda t: latest.get(t["email"], _dt.datetime.min),
             reverse=True,
         )
+
+
+def current_strategy() -> dict | None:
+    """The active self-optimizer strategy as a JSON-serialisable dict, or None.
+
+    Returns ``{version, params, baseline_reply_rate, note}`` for the active
+    ``StrategyRecord``. Safe (returns None) when no strategy has been recorded.
+    """
+    with get_session() as session:
+        row = (
+            session.query(StrategyRecord)
+            .filter(StrategyRecord.active.is_(True))
+            .order_by(StrategyRecord.created_at.desc(), StrategyRecord.id.desc())
+            .first()
+        )
+        if row is None:
+            return None
+        return {
+            "version": int(row.version),
+            "params": row.params or {},
+            "baseline_reply_rate": round(float(row.baseline_reply_rate or 0.0), 4),
+            "note": row.note or "",
+        }
+
+
+def strategy_history(limit: int = 20) -> list[dict]:
+    """Recent self-optimizer strategies (newest first), as plain dicts.
+
+    Each row: ``{version, params, active, baseline_reply_rate, note, created_at}``.
+    Safe (returns []) when the table is empty.
+    """
+    with get_session() as session:
+        rows = (
+            session.query(StrategyRecord)
+            .order_by(StrategyRecord.created_at.desc(), StrategyRecord.id.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "version": int(r.version),
+                "params": r.params or {},
+                "active": bool(r.active),
+                "baseline_reply_rate": round(float(r.baseline_reply_rate or 0.0), 4),
+                "note": r.note or "",
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]

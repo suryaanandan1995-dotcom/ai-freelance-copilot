@@ -125,5 +125,22 @@ def run_history(limit: int = 20) -> list[dict]:
     return analytics.recent_runs(limit=limit)
 
 
+@mcp.tool()
+def current_strategy() -> dict | None:
+    """Return the active self-optimizer strategy the system is running now
+    (version, params like pitch_variant/subject_style/fit_threshold,
+    baseline_reply_rate, note), or None if none has been recorded yet."""
+    init_db()
+    return analytics.current_strategy()
+
+
+@mcp.tool()
+def strategy_history(limit: int = 20) -> list[dict]:
+    """List recent self-optimizer strategy versions, newest first
+    (version, params, active, baseline_reply_rate, note, created_at)."""
+    init_db()
+    return analytics.strategy_history(limit=limit)
+
+
 if __name__ == "__main__":
     mcp.run()

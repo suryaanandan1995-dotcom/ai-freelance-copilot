@@ -69,6 +69,22 @@ class OutreachRecord(Base):
     call_booked_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class StrategyRecord(Base):
+    """A versioned self-optimizer strategy (pitch/subject variant, thresholds,
+    project/source weights). Exactly one row is active; the optimizer creates a new
+    active row on each tuning step and can reactivate a prior one on auto-revert."""
+
+    __tablename__ = "strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    params: Mapped[dict] = mapped_column(JSON, default=dict)  # {pitch_variant, subject_style, fit_threshold, weights...}
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    baseline_reply_rate: Mapped[float] = mapped_column(Float, default=0.0)  # rate to beat when this went active
+    note: Mapped[str] = mapped_column(String(512), default="")  # why the optimizer made this change
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
 class RunRecord(Base):
     """One pipeline/workflow execution — powers run history, failure alerts, and
     the funnel/analytics views. Written at the end of every run (ok or error)."""

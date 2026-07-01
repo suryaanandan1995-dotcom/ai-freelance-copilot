@@ -22,6 +22,7 @@ def seeded(tmp_path, monkeypatch):
         OutreachRecord,
         ReplyRecord,
         RunRecord,
+        StrategyRecord,
     )
 
     db_path = tmp_path / "analytics.db"
@@ -132,6 +133,34 @@ def seeded(tmp_path, monkeypatch):
                 ),
             ]
         )
+        s.add_all(
+            [
+                StrategyRecord(
+                    version=1,
+                    params={
+                        "pitch_variant": "roi_led",
+                        "subject_style": "question",
+                        "fit_threshold": 60,
+                    },
+                    active=False,
+                    baseline_reply_rate=0.10,
+                    note="initial strategy",
+                    created_at=now - _dt.timedelta(days=2),
+                ),
+                StrategyRecord(
+                    version=2,
+                    params={
+                        "pitch_variant": "proof_led",
+                        "subject_style": "benefit",
+                        "fit_threshold": 70,
+                    },
+                    active=True,
+                    baseline_reply_rate=0.18,
+                    note="raised fit threshold after low-quality replies",
+                    created_at=now,
+                ),
+            ]
+        )
         s.commit()
 
     return SessionLocal
@@ -183,3 +212,26 @@ def test_conversations_grouping(seeded):
     assert thread["email"] == "alice@example.com"
     assert [m["direction"] for m in thread["messages"]] == ["out", "in"]
     assert thread["messages"][1]["snippet"] == "Sounds interesting, tell me more."
+
+
+def test_current_strategy_returns_active(seeded):
+    import analytics
+
+    current = analytics.current_strategy()
+    assert current is not None
+    assert current["version"] == 2
+    assert current["params"]["pitch_variant"] == "proof_led"
+    assert current["params"]["fit_threshold"] == 70
+    assert current["baseline_reply_rate"] == pytest.approx(0.18)
+    assert current["note"] == "raised fit threshold after low-quality replies"
+
+
+def test_strategy_history_newest_first(seeded):
+    import analytics
+
+    history = analytics.strategy_history()
+    assert len(history) == 2
+    assert [h["version"] for h in history] == [2, 1]
+    assert history[0]["active"] is True
+    assert history[1]["active"] is False
+    assert history[1]["params"]["pitch_variant"] == "roi_led"

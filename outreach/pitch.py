@@ -14,7 +14,32 @@ from typing import Any
 from agents.llm import get_chat
 from config import get_settings
 from core.schemas import CompanyResearch, ScoredLead
+from optimizer.optimizer import active_strategy
 from voice import HUMAN_VOICE
+
+# Strategy-driven framings the self-optimizer rotates through. Each only tweaks
+# HOW the (already mandatory) proof + CTA are framed — it never relaxes a HARD
+# RULE below.
+_PITCH_VARIANT_INSTRUCTIONS = {
+    "direct": (
+        "Framing: lead with a direct, confident statement of exactly how you can "
+        "help with their post, then the cited proof."
+    ),
+    "problem-first": (
+        "Framing: open by naming the specific problem/risk implied by their post, "
+        "then show, via the cited project, that you've solved that exact problem."
+    ),
+    "proof-first": (
+        "Framing: open with the cited project + its concrete result as proof, then "
+        "connect it to what they said they need."
+    ),
+}
+
+_SUBJECT_STYLE_HINTS = {
+    "plain": "Subject style: a plain, specific statement of the topic.",
+    "question": "Subject style: phrase the subject as a short, specific question.",
+    "benefit": "Subject style: lead the subject with the concrete benefit to them.",
+}
 
 # Quantified, reusable proof points (weave in at most one, only if it fits).
 QUANTIFIED_WINS = [
@@ -81,8 +106,20 @@ def draft_email(
 ) -> dict:
     """Draft a cold-intro email. Returns ``{"subject": str, "body": str}``."""
     settings = get_settings()
+    strat = active_strategy()
     lead = scored.lead
     research = research or CompanyResearch()
+
+    # Layer the active strategy's framing + subject style onto the base system
+    # prompt. This never removes a HARD RULE — it only nudges HOW the (still
+    # mandatory) opening / proof / subject are phrased.
+    variant_note = _PITCH_VARIANT_INSTRUCTIONS.get(
+        strat.get("pitch_variant"), _PITCH_VARIANT_INSTRUCTIONS["direct"]
+    )
+    subject_note = _SUBJECT_STYLE_HINTS.get(
+        strat.get("subject_style"), _SUBJECT_STYLE_HINTS["plain"]
+    )
+    system = f"{_SYSTEM}\n\n{variant_note}\n{subject_note}"
 
     if retriever is None:
         from rag.retriever import get_retriever  # lazy: keeps module import-safe
@@ -112,7 +149,7 @@ def draft_email(
         "Write the cold intro email now in the required Subject + body format."
     )
     messages = [
-        {"role": "system", "content": _SYSTEM},
+        {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
     ai = model.invoke(messages)

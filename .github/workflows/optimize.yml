@@ -1,0 +1,56 @@
+name: Self-Optimizer
+
+# Autonomous STRATEGY tuner. Once a week it measures the outreach reply rate and
+# rotates the pitch/subject variant + (bounded) fit threshold, auto-reverting any
+# trial that hurt the reply rate. It NEVER edits source code and NEVER touches a
+# safety invariant (no auto-submit, opt-out/caps/pricing->call stay off-limits).
+#
+# IMPORTANT — persistence: the strategy history + reply outcomes live in the
+# database. GitHub Actions runners are ephemeral, so a default SQLite file is
+# thrown away after each run. Point COPILOT_DATABASE_URL at the SAME persistent
+# hosted Postgres the outreach schedule uses, otherwise every run starts from
+# scratch and can never accumulate enough samples to tune.
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"   # Mondays 05:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: optimize
+  cancel-in-progress: false
+
+jobs:
+  optimize:
+    name: Tune outreach strategy
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
+      # REQUIRED — the same persistent hosted Postgres DSN the outreach schedule
+      # uses, so reply outcomes + strategy history survive across runs.
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+      # Gate: the optimizer is a no-op unless this is "true".
+      COPILOT_SELF_OPTIMIZE: "true"
+      # SMTP is only needed so run-failure alerts can reach the owner.
+      COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
+      COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
+      COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # psycopg2-binary so a Postgres COPILOT_DATABASE_URL works; harmless on SQLite.
+        run: pip install -r requirements.txt psycopg2-binary
+
+      - name: Run the self-optimizer
+        run: python main.py optimize
