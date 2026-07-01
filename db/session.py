@@ -11,8 +11,11 @@ from config import get_settings
 from db.models import Base
 
 _settings = get_settings()
-_connect_args = {"check_same_thread": False} if _settings.database_url.startswith("sqlite") else {}
-engine = create_engine(_settings.database_url, connect_args=_connect_args, future=True)
+# An empty COPILOT_DATABASE_URL (e.g. an unset secret rendered as "" in CI) must
+# not override the default — treat blank as "unset" and fall back to SQLite.
+_db_url = (_settings.database_url or "").strip() or "sqlite:///copilot.db"
+_connect_args = {"check_same_thread": False} if _db_url.startswith("sqlite") else {}
+engine = create_engine(_db_url, connect_args=_connect_args, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 
