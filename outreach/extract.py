@@ -18,6 +18,31 @@ _EMAIL_RE = re.compile(
     r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}",
 )
 
+# Obfuscated forms people use to dodge scrapers, e.g.
+#   "name [at] domain [dot] com", "name (at) domain (dot) com".
+# We de-obfuscate the whole text first, then run the normal matcher over it.
+_AT_RE = re.compile(r"\s*[\[\(\{]\s*at\s*[\]\)\}]\s*", re.IGNORECASE)
+_DOT_RE = re.compile(r"\s*[\[\(\{]\s*dot\s*[\]\)\}]\s*", re.IGNORECASE)
+# Bare " at "/" dot " forms, only when they clearly sit between address parts.
+_AT_WORD_RE = re.compile(r"(?<=[\w])\s+at\s+(?=[\w])", re.IGNORECASE)
+_DOT_WORD_RE = re.compile(r"(?<=[\w])\s+dot\s+(?=[\w])", re.IGNORECASE)
+
+
+def _deobfuscate(text: str) -> str:
+    """Normalize common ``x [at] y [dot] z`` obfuscations into ``x@y.z``."""
+    out = _AT_RE.sub("@", text)
+    out = _DOT_RE.sub(".", out)
+    # Only touch bare-word forms when a bracketed/at marker was present, to
+    # avoid mangling ordinary prose like "meet at dot com office".
+    if "@" in out and "@" not in text:
+        out = _DOT_WORD_RE.sub(".", out)
+    elif _AT_WORD_RE.search(text) and (
+        _DOT_RE.search(text) or " dot " in text.lower()
+    ):
+        out = _AT_WORD_RE.sub("@", out)
+        out = _DOT_WORD_RE.sub(".", out)
+    return out
+
 # Local-parts that are never a person you should cold-email.
 _BAD_LOCAL_PREFIXES = (
     "noreply",
@@ -94,8 +119,15 @@ def find_contact_email(lead: Lead) -> str | None:
     haystacks.extend(_iter_raw_strings(lead.raw or {}))
 
     for text in haystacks:
-        for match in _EMAIL_RE.findall(text):
-            email = match.lower().strip(".,;:<>()[]\"'")
-            if _is_good_email(email):
-                return email
+        # Scan the raw text first (catches "email: x@y.com", "contact: x@y.com"),
+        # then a de-obfuscated copy ("name [at] domain [dot] com").
+        candidates = [text]
+        deob = _deobfuscate(text)
+        if deob != text:
+            candidates.append(deob)
+        for candidate in candidates:
+            for match in _EMAIL_RE.findall(candidate):
+                email = match.lower().strip(".,;:<>()[]\"'")
+                if _is_good_email(email):
+                    return email
     return None
