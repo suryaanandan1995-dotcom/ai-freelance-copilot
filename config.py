@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     # --- alerting ---
     alert_email: str = ""             # where run-failure alerts go (defaults to owner_email)
 
+    # --- cal.com booking webhook (completes the funnel: emailed -> replied -> call booked -> won) ---
+    cal_webhook_secret: str = ""      # HMAC secret from cal.com; blank disables signature checking
+
     # --- identity (used in proposals/signature) ---
     owner_name: str = "Surya A"
     owner_email: str = "suryaanandan1995@gmail.com"

@@ -73,6 +73,16 @@ def client(tmp_path, monkeypatch):
                 followups_sent=2,
             )
         )
+        # a prospect we've emailed but who hasn't replied yet (for cal webhook)
+        s.add(
+            OutreachRecord(
+                email="prospect@acme.com",
+                subject="Hardening your CI/CD",
+                status="sent",
+                replied=False,
+                followups_sent=0,
+            )
+        )
         s.add(
             RunRecord(
                 workflow="outreach",
@@ -217,6 +227,74 @@ def test_runs_page(client):
     assert r.status_code == 200
     assert "SMTP auth failed" in r.text
     assert "outreach" in r.text
+
+
+def _read_outreach(email):
+    import db.session as session_mod
+    from db.models import OutreachRecord
+
+    with session_mod.SessionLocal() as s:
+        return (
+            s.query(OutreachRecord).filter(OutreachRecord.email == email).one()
+        )
+
+
+def _booking_payload(email):
+    return {
+        "triggerEvent": "BOOKING_CREATED",
+        "payload": {
+            "attendees": [{"email": email, "name": "A Prospect"}],
+            "responses": {"email": {"value": email}},
+        },
+    }
+
+
+def test_cal_webhook_no_secret_marks_call_booked(client, monkeypatch):
+    import interfaces.dashboard as dash
+
+    # blank secret -> signature check skipped
+    monkeypatch.setattr(
+        dash, "get_settings", lambda: type("S", (), {"cal_webhook_secret": ""})()
+    )
+    r = client.post("/webhooks/cal", json=_booking_payload("prospect@acme.com"))
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "matched": 1}
+
+    rec = _read_outreach("prospect@acme.com")
+    assert rec.call_booked_at is not None
+    assert rec.replied is True
+
+
+def test_cal_webhook_signature_verification(client, monkeypatch):
+    import hashlib
+    import hmac
+    import json
+
+    import interfaces.dashboard as dash
+
+    secret = "s3cr3t"
+    monkeypatch.setattr(
+        dash, "get_settings", lambda: type("S", (), {"cal_webhook_secret": secret})()
+    )
+    body = json.dumps(_booking_payload("prospect@acme.com")).encode()
+
+    # wrong signature -> 401
+    bad = client.post(
+        "/webhooks/cal",
+        content=body,
+        headers={"X-Cal-Signature-256": "deadbeef", "Content-Type": "application/json"},
+    )
+    assert bad.status_code == 401
+
+    # correct HMAC-SHA256 -> 200 and matched
+    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    ok = client.post(
+        "/webhooks/cal",
+        content=body,
+        headers={"X-Cal-Signature-256": sig, "Content-Type": "application/json"},
+    )
+    assert ok.status_code == 200
+    assert ok.json() == {"ok": True, "matched": 1}
 
 
 def test_metrics_and_healthz(client):

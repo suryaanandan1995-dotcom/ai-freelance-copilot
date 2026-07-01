@@ -20,6 +20,10 @@
       <div style="font-size:30px; font-weight:700; color:var(--accent);">{{ (stats.reply_rate * 100)|round(1) }}%</div>
     </div>
     <div class="card">
+      <div class="muted">Call booked</div>
+      <div style="font-size:30px; font-weight:700; color:var(--accent);">{{ stats.calls_booked }}</div>
+    </div>
+    <div class="card">
       <div class="muted">Won</div>
       <div style="font-size:30px; font-weight:700; color:var(--accent2);">{{ stats.won }}</div>
     </div>
@@ -47,7 +51,7 @@
 
   <h2>Funnel</h2>
   <div class="card">
-    {% set funnel = [("Emailed", stats.emailed, "var(--accent)"), ("Replied", stats.replied, "var(--accent)"), ("Won", stats.won, "var(--accent2)")] %}
+    {% set funnel = [("Emailed", stats.emailed, "var(--accent)"), ("Replied", stats.replied, "var(--accent)"), ("Call booked", stats.calls_booked, "var(--accent)"), ("Won", stats.won, "var(--accent2)")] %}
     {% for label, value, color in funnel %}
       <div class="row" style="margin:10px 0; flex-wrap:nowrap;">
         <div style="width:90px; color:var(--muted); font-size:13px;">{{ label }}</div>

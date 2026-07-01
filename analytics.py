@@ -75,6 +75,11 @@ def funnel_stats() -> dict:
             .filter(OutreachRecord.status == "suppressed")
             .count()
         )
+        calls_booked = (
+            session.query(OutreachRecord)
+            .filter(OutreachRecord.call_booked_at.isnot(None))
+            .count()
+        )
         total_cost_usd = (
             session.query(func.coalesce(func.sum(RunRecord.cost_usd), 0.0)).scalar()
             or 0.0
@@ -92,6 +97,7 @@ def funnel_stats() -> dict:
             "emailed": emailed,
             "replied": replied,
             "reply_rate": round(reply_rate, 4),
+            "calls_booked": calls_booked,
             "in_progress": in_progress,
             "won": won,
             "lost": lost,

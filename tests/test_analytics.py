@@ -63,6 +63,14 @@ def seeded(tmp_path, monkeypatch):
                     status="suppressed",
                     sent_at=now,
                 ),
+                OutreachRecord(
+                    email="dave@example.com",
+                    subject="Booked a call",
+                    status="sent",
+                    sent_at=now,
+                    replied=True,
+                    call_booked_at=now,
+                ),
             ]
         )
         s.add_all(
@@ -133,14 +141,15 @@ def test_funnel_stats(seeded):
     import analytics
 
     stats = analytics.funnel_stats()
-    assert stats["emailed"] == 2
-    assert stats["replied"] == 1
-    assert stats["reply_rate"] == 0.5
+    assert stats["emailed"] == 3
+    assert stats["replied"] == 2
+    assert stats["reply_rate"] == pytest.approx(2 / 3, rel=1e-3)
+    assert stats["calls_booked"] == 1
     assert stats["won"] == 1
     assert stats["lost"] == 1
     assert stats["in_progress"] == 1
     assert stats["suppressed"] == 1
-    assert stats["emails_today"] == 2
+    assert stats["emails_today"] == 3
     assert stats["total_cost_usd"] == pytest.approx(0.5)
 
 
@@ -159,7 +168,7 @@ def test_outreach_list(seeded):
     import analytics
 
     rows = analytics.outreach_list()
-    assert len(rows) == 3
+    assert len(rows) == 4
     alice = next(r for r in rows if r["email"] == "alice@example.com")
     assert alice["replied"] is True
     assert alice["followups_sent"] == 1

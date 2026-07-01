@@ -8,20 +8,28 @@ by hand (auto-submit violates Upwork / LinkedIn / Fiverr ToS).
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import hmac
+import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 import analytics
+from config import get_settings
 from content.engine import generate as generate_content
-from db.models import LeadRecord, LeadStatus, ProposalRecord, ProposalStatus
+from db.models import LeadRecord, LeadStatus, OutreachRecord, ProposalRecord, ProposalStatus
 from db.session import get_session
 from observability import metrics
 from rag.learning import record_outcome
+
+_log = logging.getLogger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -212,6 +220,80 @@ def runs(request: Request, db: Session = Depends(get_db)) -> Response:
         request,
         "runs.html",
         {"runs": analytics.recent_runs(), "counts": _counts(db)},
+    )
+
+
+# --- cal.com booking webhook ---------------------------------------------------
+def _extract_booking_emails(payload: dict) -> list[str]:
+    """Pull attendee email(s) from a cal.com BOOKING_CREATED payload (tolerant)."""
+    emails: list[str] = []
+    for attendee in payload.get("attendees") or []:
+        if isinstance(attendee, dict):
+            email = attendee.get("email")
+            if email:
+                emails.append(email)
+    responses = payload.get("responses") or {}
+    email_resp = responses.get("email")
+    if isinstance(email_resp, dict):
+        value = email_resp.get("value")
+        if value:
+            emails.append(value)
+    elif isinstance(email_resp, str) and email_resp:
+        emails.append(email_resp)
+    # dedupe (case-insensitive) preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for email in emails:
+        key = email.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(email.strip())
+    return unique
+
+
+@app.post("/webhooks/cal")
+async def cal_webhook(request: Request, db: Session = Depends(get_db)) -> Response:
+    """Receive cal.com BOOKING_CREATED webhooks and stamp ``call_booked_at``.
+
+    Verifies the ``X-Cal-Signature-256`` HMAC-SHA256 of the raw body when a
+    secret is configured; a blank secret skips verification. Always returns 2xx
+    for accepted requests so cal.com does not retry forever.
+    """
+    raw = await request.body()
+    settings = get_settings()
+    secret = settings.cal_webhook_secret or ""
+    if secret:
+        provided = request.headers.get("X-Cal-Signature-256", "")
+        expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(provided, expected):
+            return Response(
+                json.dumps({"ok": False, "error": "bad signature"}),
+                status_code=401,
+                media_type="application/json",
+            )
+
+    matched = 0
+    try:
+        body = json.loads(raw or b"{}")
+        if body.get("triggerEvent") == "BOOKING_CREATED":
+            payload = body.get("payload") or {}
+            for email in _extract_booking_emails(payload):
+                record = (
+                    db.query(OutreachRecord)
+                    .filter(func.lower(OutreachRecord.email) == email.lower())
+                    .first()
+                )
+                if record is not None:
+                    record.call_booked_at = _utcnow()
+                    record.replied = True  # a booking implies engagement
+                    matched += 1
+    except Exception:  # noqa: BLE001 — never fail a webhook; log and 200
+        _log.exception("cal webhook processing failed")
+
+    return Response(
+        json.dumps({"ok": True, "matched": matched}),
+        status_code=200,
+        media_type="application/json",
     )
 
 

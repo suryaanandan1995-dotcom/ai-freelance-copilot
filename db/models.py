@@ -66,6 +66,7 @@ class OutreachRecord(Base):
     replied: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     followups_sent: Mapped[int] = mapped_column(Integer, default=0)
     last_contact_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
+    call_booked_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class RunRecord(Base):
