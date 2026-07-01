@@ -1,0 +1,36 @@
+# Docker + Nginx deployment for the AI Freelance Copilot dashboard.
+#
+#   docker compose up -d --build
+#
+# Serves the mission-control dashboard behind an Nginx reverse proxy on port 80
+# (add TLS for the public cal.com webhook — see DEPLOY.md § HTTPS).
+services:
+  app:
+    build: .
+    image: ai-freelance-copilot:latest
+    env_file: .env          # COPILOT_ANTHROPIC_API_KEY, COPILOT_SMTP_*, COPILOT_DATABASE_URL, COPILOT_CAL_WEBHOOK_SECRET, ...
+    expose:
+      - "8000"              # internal only; Nginx is the public entrypoint
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      # - "443:443"        # uncomment when you add TLS certs (see DEPLOY.md)
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # - ./nginx/certs:/etc/nginx/certs:ro   # mount certs here for TLS
+    restart: unless-stopped
+
+# Optional fully-self-hosted scheduler (instead of GitHub Actions). Enable with:
+#   docker compose --profile scheduler up -d
+# It runs the weekday outreach/reply/optimize passes via cron inside a container.
+# Left off by default because the GitHub Actions workflows already cover scheduling.

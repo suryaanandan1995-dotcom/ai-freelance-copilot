@@ -8,11 +8,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install dependencies first for better layer caching.
+# psycopg2-binary lets the dashboard use a Postgres COPILOT_DATABASE_URL (Neon).
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt psycopg2-binary
 
 # Copy application source.
-COPY config.py costs.py main.py pipeline.py pyproject.toml ./
+COPY config.py costs.py voice.py runlog.py analytics.py main.py pipeline.py pyproject.toml ./
 COPY core ./core
 COPY db ./db
 COPY agents ./agents
@@ -20,6 +21,10 @@ COPY sources ./sources
 COPY rag ./rag
 COPY observability ./observability
 COPY interfaces ./interfaces
+COPY outreach ./outreach
+COPY reply ./reply
+COPY followup ./followup
+COPY optimizer ./optimizer
 COPY scripts ./scripts
 COPY templates ./templates
 COPY content ./content

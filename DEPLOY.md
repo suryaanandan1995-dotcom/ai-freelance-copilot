@@ -9,6 +9,45 @@ service + expose a URL, so they're yours to authorize).
 
 ---
 
+# Option A — Docker + Nginx (recommended)
+
+The repo ships a `Dockerfile`, `docker-compose.yml`, and `nginx/default.conf`. The
+dashboard runs in a container behind an Nginx reverse proxy. **Validated: the image
+builds and every page (`/`, `/analytics`, `/runs`, `/strategy`, `/webhooks/cal`, …) serves.**
+
+### 1. Prereqs
+- Docker + Docker Compose on the server.
+- A populated `.env` in the repo root (`COPILOT_ANTHROPIC_API_KEY`, `COPILOT_SMTP_*`, `COPILOT_DATABASE_URL` = your Neon URL, `COPILOT_CAL_WEBHOOK_SECRET`).
+
+### 2. Bring it up
+```bash
+cd /home/surya/github-portfolio/ai-freelance-copilot
+docker compose up -d --build
+docker compose ps            # app + nginx should be "running"
+curl -s localhost/healthz    # -> {"status":"ok"}
+```
+Nginx serves the dashboard on **port 80**; the app container is internal only.
+
+### 3. Make it reachable for the cal.com webhook
+Open port 80 (and 443 for TLS) in your GCP firewall, or front it with a tunnel.
+- **HTTP (quick test):** point cal.com at `http://<server-ip>/webhooks/cal` if cal.com allows http.
+- **HTTPS (recommended):** get a domain → issue a cert with **certbot** (`certbot certonly --standalone -d your-domain.com`), drop `fullchain.pem`/`privkey.pem` into `nginx/certs/`, uncomment the `443` block in `nginx/default.conf` + the `443:443` port in `docker-compose.yml`, then `docker compose up -d`. Point cal.com at `https://your-domain.com/webhooks/cal`.
+- **No domain?** Run `cloudflared tunnel --url http://localhost:80` for a free HTTPS URL (see Option B step 4).
+
+### 4. Operate
+```bash
+docker compose logs -f app       # tail app logs
+docker compose restart app       # after a config/.env change
+docker compose pull && docker compose up -d --build   # update
+docker compose down              # stop
+```
+
+> The container uses your `COPILOT_DATABASE_URL` (Neon), so the dashboard shows exactly what the GitHub Actions workflows write — same data, one source of truth.
+
+---
+
+# Option B — systemd (no Docker)
+
 ## 1. One-time setup (on the server)
 ```bash
 cd /home/surya/github-portfolio/ai-freelance-copilot

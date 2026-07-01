@@ -25,11 +25,18 @@ import analytics
 from config import get_settings
 from content.engine import generate as generate_content
 from db.models import LeadRecord, LeadStatus, OutreachRecord, ProposalRecord, ProposalStatus
-from db.session import get_session
+from db.session import get_session, init_db
 from observability import metrics
 from rag.learning import record_outcome
 
 _log = logging.getLogger(__name__)
+
+# Ensure tables exist on startup so a fresh deployment (empty DB, before any
+# pipeline run) serves every page instead of 500-ing. Idempotent.
+try:
+    init_db()
+except Exception:  # pragma: no cover - never block app import on a transient DB issue
+    _log.exception("init_db() on startup failed")
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
