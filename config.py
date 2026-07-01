@@ -60,6 +60,24 @@ class Settings(BaseSettings):
     outreach_min_fit: int = 80      # only email strong-fit leads
     opt_out_mailbox: str = ""       # where "unsubscribe" replies go (defaults to owner_email)
 
+    # --- auto-reply (autonomous handling of prospect replies) ---
+    # Reads replies via IMAP and responds autonomously. HARD RULES enforced in the
+    # prompt: never quotes firm price/scope/timeline (defers to a cal.com call),
+    # never makes contractual/legal commitments; always BCCs the owner; capped per
+    # thread so it can't loop. Gated off by default.
+    auto_reply: bool = False
+    imap_host: str = "imap.gmail.com"
+    imap_port: int = 993
+    max_replies_per_thread: int = 6   # safety stop against reply loops
+    standard_rate: str = ""           # optional; blank = always defer pricing to the call
+
+    # --- follow-ups (spaced nudges when a prospect doesn't reply) ---
+    max_followups: int = 2            # touches after the first email
+    followup_after_days: int = 3      # min days of silence before the next follow-up
+
+    # --- alerting ---
+    alert_email: str = ""             # where run-failure alerts go (defaults to owner_email)
+
     # --- identity (used in proposals/signature) ---
     owner_name: str = "Surya A"
     owner_email: str = "suryaanandan1995@gmail.com"

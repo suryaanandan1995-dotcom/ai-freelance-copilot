@@ -7,6 +7,8 @@ Subcommands:
     build-kb   (Re)build the portfolio RAG knowledge base.
     stats      Print pipeline stats (lead counts by status).
     content    Generate inbound content (post / case-study / gig).
+    reply      Read prospect replies (IMAP) and respond autonomously (guardrailed).
+    followup   Send spaced follow-ups to cold-emailed leads who never replied.
 
 Dashboard / content / uvicorn are imported lazily INSIDE their handlers so that
 ``import main`` works even before those sibling modules exist.
@@ -19,9 +21,13 @@ import sys
 
 def _cmd_run(args: argparse.Namespace) -> int:
     from pipeline import run_pipeline
+    from runlog import record_run
 
-    stats = run_pipeline(
-        limit=args.limit, notify=args.notify, auto_email=args.auto_email
+    stats = record_run(
+        "outreach",
+        lambda: run_pipeline(
+            limit=args.limit, notify=args.notify, auto_email=args.auto_email
+        ),
     )
     try:
         from rich import print as rprint
@@ -83,6 +89,34 @@ def _cmd_stats(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reply(_args: argparse.Namespace) -> int:
+    from reply.runner import run_reply_pass
+    from runlog import record_run
+
+    stats = record_run("reply", lambda: run_reply_pass())
+    try:
+        from rich import print as rprint
+
+        rprint(stats)
+    except Exception:
+        print(stats)
+    return 0
+
+
+def _cmd_followup(_args: argparse.Namespace) -> int:
+    from followup.runner import run_followups
+    from runlog import record_run
+
+    stats = record_run("followup", lambda: run_followups())
+    try:
+        from rich import print as rprint
+
+        rprint(stats)
+    except Exception:
+        print(stats)
+    return 0
+
+
 def _cmd_content(args: argparse.Namespace) -> int:
     from content.engine import generate
 
@@ -122,6 +156,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stats = sub.add_parser("stats", help="Print pipeline stats.")
     p_stats.set_defaults(func=_cmd_stats)
+
+    p_reply = sub.add_parser(
+        "reply",
+        help=(
+            "Read prospect replies (IMAP) and respond autonomously in the owner's "
+            "voice. Fully auto-negotiates but never commits pricing/scope/timeline/"
+            "contracts (defers to a cal.com call), BCCs the owner, capped per thread. "
+            "Gated by COPILOT_AUTO_REPLY + SMTP config; no-op otherwise."
+        ),
+    )
+    p_reply.set_defaults(func=_cmd_reply)
+
+    p_followup = sub.add_parser(
+        "followup",
+        help=(
+            "Send spaced, polite follow-ups to cold-emailed leads who never "
+            "replied (bounded touches, min days of silence, daily-capped, "
+            "suppression-aware). Gated by COPILOT_AUTO_EMAIL + SMTP; no-op otherwise."
+        ),
+    )
+    p_followup.set_defaults(func=_cmd_followup)
 
     p_content = sub.add_parser("content", help="Generate inbound content.")
     p_content.add_argument(

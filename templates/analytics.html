@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Analytics — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Analytics</h1>
+  <p class="muted">Outreach funnel, close rate, and Claude spend. All numbers are live from the CRM.</p>
+
+  {% set base = [stats.emailed, 1]|max %}
+
+  <div class="board" style="grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));">
+    <div class="card">
+      <div class="muted">Emailed</div>
+      <div style="font-size:30px; font-weight:700;">{{ stats.emailed }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Replied</div>
+      <div style="font-size:30px; font-weight:700; color:var(--accent);">{{ stats.replied }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Reply rate</div>
+      <div style="font-size:30px; font-weight:700; color:var(--accent);">{{ (stats.reply_rate * 100)|round(1) }}%</div>
+    </div>
+    <div class="card">
+      <div class="muted">Won</div>
+      <div style="font-size:30px; font-weight:700; color:var(--accent2);">{{ stats.won }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Lost</div>
+      <div style="font-size:30px; font-weight:700; color:#fca5a5;">{{ stats.lost }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">In progress</div>
+      <div style="font-size:30px; font-weight:700;">{{ stats.in_progress }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Suppressed</div>
+      <div style="font-size:30px; font-weight:700;">{{ stats.suppressed }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Emails today</div>
+      <div style="font-size:30px; font-weight:700;">{{ stats.emails_today }}</div>
+    </div>
+    <div class="card">
+      <div class="muted">Claude cost</div>
+      <div style="font-size:30px; font-weight:700; color:var(--accent2);">${{ '%.2f'|format(stats.total_cost_usd) }}</div>
+    </div>
+  </div>
+
+  <h2>Funnel</h2>
+  <div class="card">
+    {% set funnel = [("Emailed", stats.emailed, "var(--accent)"), ("Replied", stats.replied, "var(--accent)"), ("Won", stats.won, "var(--accent2)")] %}
+    {% for label, value, color in funnel %}
+      <div class="row" style="margin:10px 0; flex-wrap:nowrap;">
+        <div style="width:90px; color:var(--muted); font-size:13px;">{{ label }}</div>
+        <div style="flex:1; background:var(--bg); border:1px solid var(--border); border-radius:8px; height:26px; overflow:hidden;">
+          <div style="height:100%; width:{{ (100 * value / base)|round(1) }}%; min-width:2px; background:{{ color }};"></div>
+        </div>
+        <div style="width:50px; text-align:right; font-weight:700;">{{ value }}</div>
+      </div>
+    {% endfor %}
+  </div>
+{% endblock %}

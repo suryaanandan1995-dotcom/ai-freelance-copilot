@@ -1,0 +1,57 @@
+name: Auto-Reply
+
+# Reads replies to our cold outreach over IMAP and responds autonomously in the
+# owner's voice. It fully auto-negotiates EXCEPT it never commits pricing, scope,
+# timeline, or contracts — those are deferred to a cal.com call. Every auto-reply
+# BCCs the owner, and each thread is capped so the bot can't loop.
+#
+# Cost note: Claude is only invoked when a real, unread reply from a known
+# prospect actually exists. An empty inbox pass makes no model call and costs
+# nothing, so polling every couple of hours is cheap.
+#
+# Persistence: the per-thread cap and conversation log live in the ReplyRecord
+# table. GitHub runners are ephemeral, so point COPILOT_DATABASE_URL at a
+# persistent hosted Postgres — otherwise the reply history resets each run.
+
+on:
+  schedule:
+    - cron: "0 8-18/2 * * 1-5"  # every 2h, 08:00-18:00 UTC, weekdays
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reply
+  cancel-in-progress: false
+
+jobs:
+  reply:
+    name: Handle prospect replies
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
+      # IMAP reuses SMTP_USER + SMTP_PASSWORD (a Gmail app password works for both);
+      # imap_host defaults to imap.gmail.com in config.py.
+      COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
+      COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
+      COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+      COPILOT_AUTO_REPLY: "true"
+      # REQUIRED for the per-thread cap + conversation log to persist across runs.
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # psycopg2-binary so a Postgres COPILOT_DATABASE_URL works; harmless on SQLite.
+        run: pip install -r requirements.txt psycopg2-binary
+
+      - name: Run auto-reply pass
+        run: python main.py reply

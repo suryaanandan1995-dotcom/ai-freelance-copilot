@@ -16,6 +16,7 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+import analytics
 from content.engine import generate as generate_content
 from db.models import LeadRecord, LeadStatus, ProposalRecord, ProposalStatus
 from db.session import get_session
@@ -174,6 +175,43 @@ def content_generate(
         request,
         "content.html",
         {"draft": draft, "selected_kind": kind, "topic": topic},
+    )
+
+
+# --- mission control: outreach / conversations / analytics / runs --------------
+@app.get("/outreach")
+def outreach(request: Request, db: Session = Depends(get_db)) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "outreach.html",
+        {"rows": analytics.outreach_list(), "counts": _counts(db)},
+    )
+
+
+@app.get("/conversations")
+def conversations(request: Request, db: Session = Depends(get_db)) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "conversations.html",
+        {"threads": analytics.conversations(), "counts": _counts(db)},
+    )
+
+
+@app.get("/analytics")
+def analytics_page(request: Request, db: Session = Depends(get_db)) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "analytics.html",
+        {"stats": analytics.funnel_stats(), "counts": _counts(db)},
+    )
+
+
+@app.get("/runs")
+def runs(request: Request, db: Session = Depends(get_db)) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "runs.html",
+        {"runs": analytics.recent_runs(), "counts": _counts(db)},
     )
 
 

@@ -14,6 +14,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 
+import analytics
 from db.models import LeadRecord, LeadStatus, ProposalStatus
 from db.session import get_session, init_db
 from pipeline import pipeline_stats as _pipeline_stats
@@ -92,6 +93,36 @@ def mark_submitted(lead_id: int) -> dict:
 def pipeline_stats() -> dict:
     """Return lead/proposal counts grouped by status."""
     return _pipeline_stats()
+
+
+# --- read-only analytics (so an agent can inspect its own state) ---------------
+@mcp.tool()
+def funnel_stats() -> dict:
+    """Return the outreach funnel: emailed, replied, reply_rate, won/lost/in_progress,
+    suppressed, total Claude cost (USD), and emails sent today."""
+    init_db()
+    return analytics.funnel_stats()
+
+
+@mcp.tool()
+def list_outreach(limit: int = 50) -> list[dict]:
+    """List recently sent cold emails (email, subject, status, replied, follow-ups)."""
+    init_db()
+    return analytics.outreach_list(limit=limit)
+
+
+@mcp.tool()
+def list_conversations() -> list[dict]:
+    """List reply threads grouped by prospect email, messages in chronological order."""
+    init_db()
+    return analytics.conversations()
+
+
+@mcp.tool()
+def run_history(limit: int = 20) -> list[dict]:
+    """List recent workflow runs (workflow, ok, cost_usd, stats, error, created_at)."""
+    init_db()
+    return analytics.recent_runs(limit=limit)
 
 
 if __name__ == "__main__":

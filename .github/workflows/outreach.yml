@@ -58,3 +58,9 @@ jobs:
 
       - name: Run outreach pipeline
         run: python main.py run --auto-email --notify
+
+      - name: Send follow-ups
+        # Spaced nudges to prior cold-emailed leads who never replied. Shares the
+        # same master gate (COPILOT_AUTO_EMAIL), daily cap, SMTP transport, and
+        # suppression list as the initial outreach; no-op if the gate is off.
+        run: python main.py followup

@@ -110,6 +110,22 @@ Outreach runs unattended, so the **dedupe/cap state must persist between runs** 
 1. **System cron on an always-on box** with a **persistent SQLite file** (or the Kubernetes CronJob). The DB lives on disk and survives across runs, so dedupe works out of the box. Add `--auto-email` to the scheduled command and set the env vars.
 2. **GitHub Actions** ([`.github/workflows/outreach.yml`](.github/workflows/outreach.yml)) — runners are **ephemeral**, so you **must** point `COPILOT_DATABASE_URL` at a **persistent hosted Postgres**. Without it the dedupe table is thrown away every run. The workflow runs weekdays 06:00 UTC (plus manual dispatch), with a `concurrency` group so runs never overlap, and reads `COPILOT_ANTHROPIC_API_KEY`, `COPILOT_SMTP_*`, `COPILOT_AUTO_EMAIL`, and `COPILOT_DATABASE_URL` from repo secrets.
 
+## Auto-Reply
+
+When a prospect replies to one of those cold emails, the auto-reply subsystem ([`reply/`](reply/)) reads the reply over **IMAP** and responds **autonomously in your voice** — so a conversation keeps moving even while you sleep. It **fully auto-negotiates** the back-and-forth (answering technical and logistical questions helpfully) with one hard exception, and it only ever talks to people you actually emailed (a sender matching an `OutreachRecord` or an existing `ReplyRecord`).
+
+**Hard guardrails** — this is where the safety lives:
+
+- **Never commits pricing, scope, timeline, or contracts.** If the prospect asks about rate, cost, budget, scope, or a deadline, the bot says it depends on specifics and **proposes a short [cal.com](https://cal.com/) call** with your booking link. It cannot quote a firm number, agree to a fixed scope, or accept an NDA / contract on its own — those decisions stay with you, on the call. (Set `COPILOT_STANDARD_RATE` if you want it to mention a rough ballpark; blank = always defer.)
+- **You're BCC'd on every reply.** Every autonomous message copies your inbox (`COPILOT_OPT_OUT_MAILBOX` or your owner email), so you see exactly what went out the moment it's sent.
+- **Capped per thread.** After `COPILOT_MAX_REPLIES_PER_THREAD` (default **6**) autonomous replies to one prospect, the bot stops replying to that thread — a hard stop against reply loops.
+- **Unsubscribe handling.** A not-interested / "unsubscribe" / "remove" / "stop" / hostile reply is acknowledged in one polite line and the address is appended to the suppression list (`data/suppressed.txt`) so nothing further is sent.
+- **Truthful.** It never invents experience beyond your portfolio.
+
+Enable it by setting `COPILOT_AUTO_REPLY=true` plus your SMTP/IMAP creds (IMAP reuses `COPILOT_SMTP_USER` + `COPILOT_SMTP_PASSWORD`; a Gmail app password works for both), then run a pass manually with `python main.py reply` or on the schedule in [`.github/workflows/reply.yml`](.github/workflows/reply.yml) (every 2h, 08:00–18:00 UTC on weekdays). Claude is only invoked when a real unread reply exists, so an empty inbox pass costs nothing — frequent polling is cheap. Like outreach, the per-thread cap and conversation log live in the DB, so on ephemeral runners point `COPILOT_DATABASE_URL` at persistent Postgres.
+
+> **Still watch your inbox.** This runs *with* you, not instead of you. You're BCC'd on every reply and can jump into any thread at any time — reply directly yourself, and the human touch takes over. The bot deliberately hands off anything about money, scope, or commitment to a call with **you**.
+
 ## Cost Guardrail
 
 Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$2.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
@@ -158,6 +174,7 @@ ai-freelance-copilot/
 │   └── followup.py             # polite nudge drafts
 ├── sources/                    # read-only lead adapters + registry
 ├── outreach/                   # auto-email channel: extract → pitch → send (gated, deduped, opt-out)
+├── reply/                      # auto-reply: inbox (IMAP) → respond (guardrailed) → sender → runner
 ├── rag/                        # embedder, vector store, retriever, ingest, learning loop
 ├── db/                         # SQLAlchemy models + session
 ├── observability/metrics.py    # Prometheus metrics (no-op if absent)
@@ -172,7 +189,7 @@ ai-freelance-copilot/
 ├── docs/architecture.drawio
 ├── tests/                      # offline test suite (no API key, no network)
 ├── Dockerfile · Makefile · requirements.txt · pyproject.toml
-└── .github/workflows/            # ci.yml · outreach.yml (scheduled auto-email)
+└── .github/workflows/            # ci.yml · outreach.yml (scheduled auto-email) · reply.yml (scheduled auto-reply)
 ```
 
 ## Prerequisites

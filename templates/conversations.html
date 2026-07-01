@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Conversations — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Conversations</h1>
+  <p class="muted">Reply threads with each prospect, most recently active first.</p>
+
+  {% if threads %}
+    {% for t in threads %}
+      <div class="card">
+        <div class="lead-title" style="margin-bottom:10px;">{{ t.email }}</div>
+        {% for m in t.messages %}
+          {% set inbound = m.direction == "in" %}
+          <div style="display:flex; margin:8px 0; {{ 'justify-content:flex-start;' if inbound else 'justify-content:flex-end;' }}">
+            <div style="max-width:75%; background:{{ 'var(--bg)' if inbound else 'rgba(56,189,248,0.10)' }};
+                        border:1px solid {{ 'var(--border)' if inbound else 'var(--accent)' }};
+                        border-radius:10px; padding:10px 14px;">
+              <div class="muted" style="font-size:11px; margin-bottom:4px;">
+                {{ "Prospect" if inbound else "Copilot" }}
+                {% if m.created_at %}&middot; {{ m.created_at }}{% endif %}
+              </div>
+              {% if m.subject %}<div style="font-weight:600; font-size:13px;">{{ m.subject }}</div>{% endif %}
+              <div style="font-size:14px; white-space:pre-wrap;">{{ m.snippet }}</div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="card muted">No conversations yet.</div>
+  {% endif %}
+{% endblock %}

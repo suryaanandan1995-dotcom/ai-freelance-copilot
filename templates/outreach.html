@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Outreach — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Outreach</h1>
+  <p class="muted">Every cold email the copilot has sent, newest first.</p>
+
+  {% if rows %}
+  <div class="card" style="padding:0; overflow-x:auto;">
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+      <thead>
+        <tr style="text-align:left; color:var(--muted);">
+          <th style="padding:10px 14px;">Email</th>
+          <th style="padding:10px 14px;">Subject</th>
+          <th style="padding:10px 14px;">Status</th>
+          <th style="padding:10px 14px;">Replied</th>
+          <th style="padding:10px 14px;">Follow-ups</th>
+          <th style="padding:10px 14px;">Sent</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in rows %}
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:10px 14px; color:var(--text);">{{ o.email }}</td>
+          <td style="padding:10px 14px; color:var(--muted);">{{ o.subject or "—" }}</td>
+          <td style="padding:10px 14px;">
+            {% if o.status == "sent" %}
+              <span class="tag" style="color:var(--accent2); border-color:var(--accent2);">sent</span>
+            {% elif o.status == "failed" %}
+              <span class="tag" style="color:#fca5a5; border-color:#7f1d1d;">failed</span>
+            {% else %}
+              <span class="tag">{{ o.status }}</span>
+            {% endif %}
+          </td>
+          <td style="padding:10px 14px;">
+            {% if o.replied %}<span style="color:var(--accent2);">&#10003;</span>
+            {% else %}<span style="color:var(--muted);">&#10007;</span>{% endif %}
+          </td>
+          <td style="padding:10px 14px; color:var(--text);">{{ o.followups_sent }}</td>
+          <td style="padding:10px 14px; color:var(--muted);">{{ o.sent_at or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="card muted">No emails sent yet.</div>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Runs — AI Freelance Copilot{% endblock %}
+{% block content %}
+  <h1>Runs</h1>
+  <p class="muted">Recent workflow executions, newest first. Failed runs show the error.</p>
+
+  {% if runs %}
+  <div class="card" style="padding:0; overflow-x:auto;">
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+      <thead>
+        <tr style="text-align:left; color:var(--muted);">
+          <th style="padding:10px 14px;">Workflow</th>
+          <th style="padding:10px 14px;">Result</th>
+          <th style="padding:10px 14px;">Cost</th>
+          <th style="padding:10px 14px;">Stats</th>
+          <th style="padding:10px 14px;">When</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:10px 14px; color:var(--text); text-transform:capitalize;">{{ r.workflow }}</td>
+          <td style="padding:10px 14px;">
+            {% if r.ok %}
+              <span class="badge score-high">ok</span>
+            {% else %}
+              <span class="badge" style="background:#7f1d1d; color:#fecaca;">fail</span>
+              {% if r.error %}<div class="muted" style="margin-top:4px; color:#fca5a5;">{{ r.error }}</div>{% endif %}
+            {% endif %}
+          </td>
+          <td style="padding:10px 14px; color:var(--accent2);">${{ '%.4f'|format(r.cost_usd) }}</td>
+          <td style="padding:10px 14px; color:var(--muted);">
+            {% if r.stats %}
+              {% for k, v in r.stats.items() %}
+                <span class="tag">{{ k }}: {{ v }}</span>
+              {% endfor %}
+            {% else %}—{% endif %}
+          </td>
+          <td style="padding:10px 14px; color:var(--muted);">{{ r.created_at or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    <div class="card muted">No runs recorded yet.</div>
+  {% endif %}
+{% endblock %}

@@ -16,7 +16,16 @@ from sqlalchemy.orm import sessionmaker
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     import db.session as session_mod
-    from db.models import Base, LeadRecord, LeadStatus, ProposalRecord, ProposalStatus
+    from db.models import (
+        Base,
+        LeadRecord,
+        LeadStatus,
+        OutreachRecord,
+        ProposalRecord,
+        ProposalStatus,
+        ReplyRecord,
+        RunRecord,
+    )
 
     db_path = tmp_path / "test.db"
     engine = create_engine(
@@ -53,6 +62,41 @@ def client(tmp_path, monkeypatch):
                 cited_projects=["multi-cloud-k8s-terraform"],
                 status=ProposalStatus.draft,
             )
+        )
+        # mission-control data: outreach, a reply thread, and a run
+        s.add(
+            OutreachRecord(
+                email="dana@example.com",
+                subject="Cutting your cloud bill",
+                status="sent",
+                replied=True,
+                followups_sent=2,
+            )
+        )
+        s.add(
+            RunRecord(
+                workflow="outreach",
+                ok=False,
+                cost_usd=0.13,
+                stats={"emailed": 3},
+                error="SMTP auth failed",
+            )
+        )
+        s.add_all(
+            [
+                ReplyRecord(
+                    email="dana@example.com",
+                    direction="out",
+                    subject="Cutting your cloud bill",
+                    snippet="Hi Dana, noticed your stack ...",
+                ),
+                ReplyRecord(
+                    email="dana@example.com",
+                    direction="in",
+                    subject="Re: Cutting your cloud bill",
+                    snippet="Yes, we overspend on egress.",
+                ),
+            ]
         )
         s.commit()
         lead_id = lead.id
@@ -145,6 +189,34 @@ def test_content_page(client):
     r = client.get("/content")
     assert r.status_code == 200
     assert "Inbound Content Engine" in r.text
+
+
+def test_outreach_page(client):
+    r = client.get("/outreach")
+    assert r.status_code == 200
+    assert "dana@example.com" in r.text
+    assert "Cutting your cloud bill" in r.text
+
+
+def test_conversations_page(client):
+    r = client.get("/conversations")
+    assert r.status_code == 200
+    assert "dana@example.com" in r.text
+    assert "Yes, we overspend on egress." in r.text
+
+
+def test_analytics_page(client):
+    r = client.get("/analytics")
+    assert r.status_code == 200
+    assert "Analytics" in r.text
+    assert "Reply rate" in r.text
+
+
+def test_runs_page(client):
+    r = client.get("/runs")
+    assert r.status_code == 200
+    assert "SMTP auth failed" in r.text
+    assert "outreach" in r.text
 
 
 def test_metrics_and_healthz(client):

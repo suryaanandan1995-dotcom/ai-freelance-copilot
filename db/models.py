@@ -10,8 +10,10 @@ import enum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -60,6 +62,40 @@ class OutreachRecord(Base):
     subject: Mapped[str] = mapped_column(String(512), default="")
     status: Mapped[str] = mapped_column(String(32), default="sent")  # sent | suppressed | failed
     sent_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
+    # follow-up + funnel tracking
+    replied: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    followups_sent: Mapped[int] = mapped_column(Integer, default=0)
+    last_contact_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class RunRecord(Base):
+    """One pipeline/workflow execution — powers run history, failure alerts, and
+    the funnel/analytics views. Written at the end of every run (ok or error)."""
+
+    __tablename__ = "runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow: Mapped[str] = mapped_column(String(32), index=True)  # outreach | reply | followup
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class ReplyRecord(Base):
+    """A message in an auto-reply conversation (inbound from a prospect or the
+    outbound auto-reply). Used to thread correctly and cap replies per prospect."""
+
+    __tablename__ = "replies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), index=True)  # the prospect's address
+    direction: Mapped[str] = mapped_column(String(8))            # "in" | "out"
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    snippet: Mapped[str] = mapped_column(Text, default="")
+    message_id: Mapped[str | None] = mapped_column(String(512), nullable=True)  # for threading
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class LeadRecord(Base):
