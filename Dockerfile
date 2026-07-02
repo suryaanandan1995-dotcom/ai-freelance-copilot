@@ -37,9 +37,10 @@ USER appuser
 
 EXPOSE 8000
 
+# Health check honors $PORT (Render/Cloud Run inject it; defaults to 8000 locally).
 HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
+    CMD python -c "import urllib.request,os,sys; p=os.environ.get('PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/healthz').status==200 else 1)"
 
-# Default: serve the human approval dashboard. The daily discovery run is a
-# separate CronJob (see k8s/cronjob.yaml) that overrides the command.
-CMD ["python", "main.py", "dashboard", "--host", "0.0.0.0", "--port", "8000"]
+# Default: serve the dashboard. Shell form so ${PORT} (set by Render/Cloud Run) is
+# honored — those platforms route to the port they assign, not a fixed 8000.
+CMD ["sh", "-c", "python main.py dashboard --host 0.0.0.0 --port ${PORT:-8000}"]
