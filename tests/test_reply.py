@@ -128,7 +128,14 @@ def test_run_reply_pass_noop_when_auto_reply_off(temp_db, monkeypatch):
     )
 
     stats = runner.run_reply_pass()
-    assert stats == {"inbound": 0, "replied": 0, "suppressed": 0, "skipped": 0, "capped": 0}
+    assert stats == {
+        "inbound": 0,
+        "replied": 0,
+        "suppressed": 0,
+        "skipped": 0,
+        "capped": 0,
+        "flagged": 0,
+    }
 
 
 # --------------------------------------------------------------------------- #

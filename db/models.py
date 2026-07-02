@@ -115,6 +115,27 @@ class ReplyRecord(Base):
     created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class PostRecord(Base):
+    """One LinkedIn post drafted by the content engine. Rows with status='published'
+    have gone live via the API; 'draft' rows were generated but not published. Powers
+    the per-day cap and content dedupe (never publish the same body twice)."""
+
+    __tablename__ = "posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(32), default="linkedin", index=True)
+    kind: Mapped[str] = mapped_column(String(32), default="post")  # post | case_study | gig
+    topic: Mapped[str] = mapped_column(String(512), default="")
+    body: Mapped[str] = mapped_column(Text)
+    body_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)  # dedupe
+    status: Mapped[str] = mapped_column(String(32), default="draft", index=True)  # draft | published | failed
+    post_urn: Mapped[str | None] = mapped_column(String(256), nullable=True)  # LinkedIn share URN
+    post_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    published_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class LeadRecord(Base):
     __tablename__ = "leads"
     __table_args__ = (UniqueConstraint("source", "external_id", name="uq_source_external"),)

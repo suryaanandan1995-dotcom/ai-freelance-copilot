@@ -94,7 +94,14 @@ def _suppress(email: str) -> None:
 
 def run_reply_pass(limit: int = 20, chat=None) -> dict:
     """Run one auto-reply pass. Returns per-outcome counters."""
-    stats = {"inbound": 0, "replied": 0, "suppressed": 0, "skipped": 0, "capped": 0}
+    stats = {
+        "inbound": 0,
+        "replied": 0,
+        "suppressed": 0,
+        "skipped": 0,
+        "capped": 0,
+        "flagged": 0,
+    }
 
     settings = get_settings()
     if not settings.auto_reply:
@@ -152,6 +159,20 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
                         references=references,
                     )
                 stats["suppressed"] += 1
+                continue
+
+            if action == "flag":
+                # Possible scam/fraud — never auto-answer. The inbound is already
+                # recorded (shows in the dashboard Conversations view); a human
+                # reviews it. We deliberately send nothing.
+                scam = res.get("scam") or {}
+                logger.warning(
+                    "run_reply_pass: FLAGGED possible scam from %s — not replying "
+                    "(reasons: %s)",
+                    email,
+                    "; ".join(scam.get("reasons", [])),
+                )
+                stats["flagged"] += 1
                 continue
 
             if action == "reply":

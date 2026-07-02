@@ -95,6 +95,20 @@ class Settings(BaseSettings):
     optimize_min_samples: int = 20    # need this many contacted-with-known-outcome leads before tuning
     optimize_revert_drop: float = 0.05  # revert a trial if reply rate falls this much vs baseline
 
+    # --- LinkedIn auto-posting (OAuth w_member_social; publishes content-engine drafts) ---
+    # This is DISTINCT from the auto-submit ban. Publishing an ORIGINAL post to your
+    # OWN feed through LinkedIn's official API with a member-authorized OAuth token is
+    # ToS-compliant. (The ban is on scraping / bot-submitting proposals to *other*
+    # people's job posts.) Gated off by default; requires an access token carrying the
+    # w_member_social scope. Content still comes from the RAG-grounded content engine.
+    linkedin_auto_post: bool = False        # master gate for auto-publishing to LinkedIn
+    linkedin_access_token: str = ""         # OAuth 2.0 access token (w_member_social)
+    linkedin_refresh_token: str = ""        # used to mint a fresh access token when it expires
+    linkedin_client_id: str = ""            # app Client ID (for token refresh)
+    linkedin_client_secret: str = ""        # app Client Secret (for token refresh)
+    linkedin_author_urn: str = ""           # urn:li:person:<id>; auto-derived from the token if blank
+    max_posts_per_day: int = 1              # anti-spam / feed-fatigue guard
+
     # --- identity (used in proposals/signature) ---
     owner_name: str = "Surya A"
     owner_email: str = "suryaanandan1995@gmail.com"

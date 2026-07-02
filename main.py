@@ -149,6 +149,26 @@ def _cmd_content(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_linkedin_post(args: argparse.Namespace) -> int:
+    from linkedin.poster import post_to_linkedin
+    from runlog import record_run
+
+    stats = record_run(
+        "linkedin",
+        lambda: post_to_linkedin(kind=args.kind, topic=args.topic, publish=args.publish),
+    )
+    body = stats.pop("body", "") if isinstance(stats, dict) else ""
+    try:
+        from rich import print as rprint
+
+        rprint(stats)
+    except Exception:
+        print(stats)
+    if body:
+        print("\n--- post body ---\n" + body)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="copilot", description="AI Freelance Copilot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -221,6 +241,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_content.add_argument("--topic", default="", help="Topic / subject for the content.")
     p_content.set_defaults(func=_cmd_content)
+
+    p_li = sub.add_parser(
+        "linkedin-post",
+        help=(
+            "Generate a RAG-grounded post and (with --publish) publish it to your OWN "
+            "LinkedIn feed via the official API. Gated by COPILOT_LINKEDIN_AUTO_POST + "
+            "an OAuth token (w_member_social); deduped + daily-capped. Without --publish "
+            "it only drafts. Never touches other accounts and never scrapes."
+        ),
+    )
+    p_li.add_argument("--kind", choices=["post", "case-study", "gig"], default="post")
+    p_li.add_argument("--topic", default="", help="Topic / angle for the post.")
+    p_li.add_argument(
+        "--publish",
+        action="store_true",
+        help="Actually publish to LinkedIn (default: draft only).",
+    )
+    p_li.set_defaults(func=_cmd_linkedin_post)
 
     return parser
 
