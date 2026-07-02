@@ -39,14 +39,19 @@ reachable only from machines on the same private network / VPC — never the int
 
 ```bash
 # in .env: set a strong COPILOT_DASHBOARD_PASSWORD
-./deploy/run-internal.sh     # binds to the detected internal IP, prints the URL
+./deploy/run-internal.sh     # generates a self-signed cert + serves HTTPS on the internal IP
 ```
-Then open **`http://<internal-ip>:8000`** from a workstation on the same network
+Then open **`https://<internal-ip>:8000`** from a workstation on the same network
 (this server's internal IP is shown by `ip -4 route get 1.1.1.1`). Login required.
 
+- **HTTPS is on** via a self-signed cert (`deploy/gen-cert.sh`, auto-run on first start).
+  You'll see a one-time "not trusted" browser warning — accept it, or import
+  `deploy/certs/dashboard.crt` into your machine's trust store to remove it. The private
+  key (`deploy/certs/dashboard.key`) is gitignored — never commit it. (A public CA won't
+  issue a cert for a private IP, so self-signed is the correct choice here.)
 - You may need a **VPC firewall rule** allowing `TCP:8000` from your internal ranges.
-- Run it persistently with the systemd unit (Option B) — just change `--host 0.0.0.0`
-  to your internal IP (or leave `0.0.0.0`; with no public IP it's internal-only anyway).
+- Run it persistently with the systemd unit (Option B) — add
+  `--tls-cert deploy/certs/dashboard.crt --tls-key deploy/certs/dashboard.key` to its ExecStart.
 - **Set the dashboard password** — on a shared network, an unauthenticated UI is exposed to every host that can reach it.
 
 ---

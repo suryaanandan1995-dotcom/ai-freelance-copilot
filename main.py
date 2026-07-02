@@ -42,7 +42,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_dashboard(args: argparse.Namespace) -> int:
     import uvicorn
 
-    uvicorn.run("interfaces.dashboard:app", host=args.host, port=args.port, reload=False)
+    kwargs: dict = {"host": args.host, "port": args.port, "reload": False}
+    if args.tls_cert and args.tls_key:
+        # Serve HTTPS (self-signed cert is fine for a private/internal dashboard).
+        kwargs["ssl_certfile"] = args.tls_cert
+        kwargs["ssl_keyfile"] = args.tls_key
+    uvicorn.run("interfaces.dashboard:app", **kwargs)
     return 0
 
 
@@ -165,6 +170,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash = sub.add_parser("dashboard", help="Serve the human approval dashboard.")
     p_dash.add_argument("--host", default="0.0.0.0")
     p_dash.add_argument("--port", type=int, default=8000)
+    p_dash.add_argument("--tls-cert", default=None, help="PEM cert file → serve HTTPS.")
+    p_dash.add_argument("--tls-key", default=None, help="PEM private key file → serve HTTPS.")
     p_dash.set_defaults(func=_cmd_dashboard)
 
     p_mcp = sub.add_parser("mcp", help="Run the MCP stdio server.")
