@@ -32,6 +32,23 @@ SSH tunnel) and expose **only** the cal.com webhook via a short-lived Cloudflare
 
 > ⚠️ Even a tunnel is outbound traffic from the host — run this on a **personal** machine/VM, not the corporate jumpserver. If you must use the corp box, bring the tunnel up only while testing, then Ctrl-C it.
 
+## Access via internal IP (VPC-only, no public exposure)
+
+This host has **no public IP**, so binding the dashboard to its **internal IP** makes it
+reachable only from machines on the same private network / VPC — never the internet.
+
+```bash
+# in .env: set a strong COPILOT_DASHBOARD_PASSWORD
+./deploy/run-internal.sh     # binds to the detected internal IP, prints the URL
+```
+Then open **`http://<internal-ip>:8000`** from a workstation on the same network
+(this server's internal IP is shown by `ip -4 route get 1.1.1.1`). Login required.
+
+- You may need a **VPC firewall rule** allowing `TCP:8000` from your internal ranges.
+- Run it persistently with the systemd unit (Option B) — just change `--host 0.0.0.0`
+  to your internal IP (or leave `0.0.0.0`; with no public IP it's internal-only anyway).
+- **Set the dashboard password** — on a shared network, an unauthenticated UI is exposed to every host that can reach it.
+
 ---
 
 # Option C — Render.com (free, personal HTTPS, recommended)
