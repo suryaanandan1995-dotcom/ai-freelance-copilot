@@ -8,6 +8,7 @@ from sources.base import LeadSource, dedupe
 from sources.contra_startup import ContraStartupSource
 from sources.hn_freelancer import HNFreelancerSource
 from sources.hn_hiring import HNWhoIsHiringSource
+from sources.reddit_forhire import RedditForHireSource
 from sources.remote_boards import RemoteBoardsSource
 from sources.upwork_rss import UpworkRSSSource
 
@@ -22,6 +23,7 @@ def get_default_sources() -> list[LeadSource]:
         ContraStartupSource(),
         HNWhoIsHiringSource(),
         HNFreelancerSource(),
+        RedditForHireSource(),
     ]
 
 
