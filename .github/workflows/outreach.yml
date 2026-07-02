@@ -63,4 +63,7 @@ jobs:
         # Spaced nudges to prior cold-emailed leads who never replied. Shares the
         # same master gate (COPILOT_AUTO_EMAIL), daily cap, SMTP transport, and
         # suppression list as the initial outreach; no-op if the gate is off.
+        # Secondary step — must NOT fail the run: the primary outreach already ran
+        # above, so a follow-up hiccup shouldn't mark the pipeline failed.
+        continue-on-error: true
         run: python main.py followup

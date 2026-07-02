@@ -1,6 +1,22 @@
-INFO:     Started server process [2388334]
+INFO:     Started server process [2398988]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
-ERROR:    [Errno 98] error while attempting to bind on address ('0.0.0.0', 8000): address already in use
-INFO:     Waiting for application shutdown.
-INFO:     Application shutdown complete.
+INFO:     Uvicorn running on https://0.0.0.0:8080 (Press CTRL+C to quit)
+INFO:     10.131.60.135:36816 - "GET /healthz HTTP/1.1" 200 OK
+INFO:     10.131.60.135:36828 - "GET / HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54200 - "GET / HTTP/1.1" 401 Unauthorized
+INFO:     10.134.65.198:54282 - "GET / HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54282 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     10.134.65.198:54303 - "GET / HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54303 - "GET / HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54303 - "GET /pipeline HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54322 - "GET /outreach HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54322 - "GET /conversations HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54322 - "GET /analytics HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54322 - "GET /runs HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54322 - "GET /analytics HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54341 - "GET /analytics HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54341 - "GET /runs HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54341 - "GET /strategy HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54341 - "GET /content HTTP/1.1" 200 OK
+INFO:     10.134.65.198:54411 - "POST /content/generate HTTP/1.1" 200 OK
