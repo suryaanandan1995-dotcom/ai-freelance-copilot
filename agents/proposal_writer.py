@@ -100,6 +100,6 @@ def write_proposal(
         lead_external_id=lead.external_id,
         title=f"Proposal: {lead.title}",
         body=body,
-        suggested_rate=lead.budget or "$85/hr (negotiable to project scope)",
+        suggested_rate=lead.budget or "$40-60/hr (negotiable to project scope)",
         cited_projects=cited,
     )

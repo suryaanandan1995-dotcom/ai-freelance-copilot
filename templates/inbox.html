@@ -2,26 +2,52 @@
 {% block title %}Inbox — AI Freelance Copilot{% endblock %}
 {% block content %}
   <h1>Inbox — proposals awaiting your review</h1>
-  <p class="muted">Drafted &amp; approved leads, highest fit first. Review, edit, and submit on the platform yourself.</p>
+  <p class="muted">
+    Drafted &amp; approved leads, highest fit first. Nothing is ever auto-submitted to a
+    platform (that's a ToS/ban risk) — you approve here, then submit on the platform
+    yourself. Tick the ones that look good and <strong>Approve selected</strong> in one go.
+  </p>
 
   {% if leads %}
-  <div class="lead-list">
-    {% for lead in leads %}
-      <a class="lead-item" href="/lead/{{ lead.id }}">
+  <form method="post" action="/approve-bulk">
+    <div class="row" style="gap:14px; align-items:center; margin-bottom:12px;">
+      <button type="submit" class="btn-accent">Approve selected</button>
+      <label class="muted" style="cursor:pointer;">
+        <input type="checkbox" id="select-all"> Select all draft proposals
+      </label>
+    </div>
+
+    <div class="lead-list">
+      {% for lead in leads %}
         <div class="card">
-          <div class="row">
+          <div class="row" style="align-items:center; gap:10px;">
+            {% if lead.status == 'drafted' %}
+              <input type="checkbox" class="lead-check" name="lead_ids" value="{{ lead.id }}">
+            {% else %}
+              <input type="checkbox" checked disabled title="already approved">
+            {% endif %}
             {% set s = lead.fit_score %}
             <span class="badge {{ 'score-high' if s >= 85 else ('score-mid' if s >= 70 else 'score-low') }}">{{ s }}</span>
-            <span class="lead-title">{{ lead.title }}</span>
+            <a class="lead-title" href="/lead/{{ lead.id }}">{{ lead.title }}</a>
             <span class="tag">{{ lead.status }}</span>
           </div>
           <div class="muted" style="margin-top:6px;">
             {{ lead.company or "Unknown company" }} &middot; via {{ lead.source }}
           </div>
         </div>
-      </a>
-    {% endfor %}
-  </div>
+      {% endfor %}
+    </div>
+  </form>
+
+  <script>
+    (function () {
+      var all = document.getElementById('select-all');
+      if (!all) return;
+      all.addEventListener('change', function () {
+        document.querySelectorAll('.lead-check').forEach(function (c) { c.checked = all.checked; });
+      });
+    })();
+  </script>
   {% else %}
     <div class="card muted">No drafted or approved leads yet. Run the pipeline to populate the inbox.</div>
   {% endif %}

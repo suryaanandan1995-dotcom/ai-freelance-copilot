@@ -178,6 +178,23 @@ def approve(
     return RedirectResponse(f"/lead/{lead_id}", status_code=303)
 
 
+@app.post("/approve-bulk")
+def approve_bulk(
+    lead_ids: list[int] = Form([]),
+    db: Session = Depends(get_db),
+    _auth: None = Depends(require_auth),
+) -> RedirectResponse:
+    """Approve many drafted proposals at once (from the Inbox checkboxes)."""
+    for lead_id in lead_ids:
+        lead = db.get(LeadRecord, lead_id)
+        if lead is not None and lead.status == LeadStatus.drafted:
+            lead.status = LeadStatus.approved
+            proposal = _latest_proposal(lead)
+            if proposal is not None:
+                proposal.status = ProposalStatus.approved
+    return RedirectResponse("/", status_code=303)
+
+
 @app.post("/lead/{lead_id}/submitted")
 def mark_submitted(
     lead_id: int, db: Session = Depends(get_db), _auth: None = Depends(require_auth)

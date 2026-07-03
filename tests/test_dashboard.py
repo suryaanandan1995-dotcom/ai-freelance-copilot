@@ -164,6 +164,37 @@ def test_approve_transitions_status(client):
     assert pstatus == ProposalStatus.approved
 
 
+def test_bulk_approve_transitions_many(client):
+    import db.session as session_mod
+    from db.models import LeadRecord, LeadStatus, ProposalRecord, ProposalStatus
+
+    # add a second drafted lead so we approve more than one at once
+    with session_mod.SessionLocal() as s:
+        lead2 = LeadRecord(
+            source="hn_hiring",
+            external_id="ext-2",
+            title="Set up GitOps with ArgoCD",
+            status=LeadStatus.drafted,
+            fit_score=80,
+        )
+        s.add(lead2)
+        s.flush()
+        s.add(ProposalRecord(lead_id=lead2.id, body="draft 2", status=ProposalStatus.draft))
+        s.commit()
+        lead2_id = lead2.id
+
+    r = client.post(
+        "/approve-bulk",
+        data={"lead_ids": [client.lead_id, lead2_id]},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    with session_mod.SessionLocal() as s:
+        for lid in (client.lead_id, lead2_id):
+            lead = s.get(LeadRecord, lid)
+            assert lead.status == LeadStatus.approved
+
+
 def test_save_proposal_edits_body(client):
     r = client.post(
         f"/lead/{client.lead_id}/proposal",
