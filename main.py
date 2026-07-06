@@ -153,10 +153,27 @@ def _cmd_linkedin_post(args: argparse.Namespace) -> int:
     from linkedin.poster import post_to_linkedin
     from runlog import record_run
 
-    stats = record_run(
-        "linkedin",
-        lambda: post_to_linkedin(kind=args.kind, topic=args.topic, publish=args.publish),
-    )
+    # Capture stats even when we raise, so a failed publish (e.g. an expired token)
+    # both (a) triggers record_run's owner failure-alert email + red CI, and
+    # (b) still prints what happened here.
+    holder: dict = {}
+
+    def _run() -> dict:
+        stats = post_to_linkedin(kind=args.kind, topic=args.topic, publish=args.publish)
+        holder.update(stats or {})
+        if (stats or {}).get("status") == "failed":
+            # Raise so record_run alerts the owner + the CI step goes red. A
+            # "skipped" (daily cap / gate off) is NOT a failure and won't alert.
+            raise RuntimeError(f"LinkedIn publish failed: {stats.get('reason')}")
+        return stats
+
+    failed = False
+    try:
+        stats = record_run("linkedin", _run)
+    except Exception:
+        stats = holder  # record_run already persisted + emailed the alert
+        failed = True
+
     body = stats.pop("body", "") if isinstance(stats, dict) else ""
     try:
         from rich import print as rprint
@@ -166,7 +183,7 @@ def _cmd_linkedin_post(args: argparse.Namespace) -> int:
         print(stats)
     if body:
         print("\n--- post body ---\n" + body)
-    return 0
+    return 1 if failed else 0
 
 
 def build_parser() -> argparse.ArgumentParser:

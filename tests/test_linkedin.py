@@ -124,6 +124,47 @@ def test_daily_cap_blocks_second_post(temp_db, monkeypatch):
     assert fake2.posted == []
 
 
+def test_cli_alerts_and_fails_on_failed_publish(temp_db, monkeypatch):
+    """A failed publish (e.g. expired token) must alert the owner + return rc=1."""
+    import linkedin.poster as poster_mod
+    import main
+    import runlog
+
+    monkeypatch.setattr(
+        poster_mod,
+        "post_to_linkedin",
+        lambda **kw: {"status": "failed", "reason": "401 invalid token", "body": "x"},
+    )
+    alerts: list[str] = []
+    monkeypatch.setattr(runlog, "send_alert", lambda subject, body: alerts.append(subject))
+
+    rc = main._cmd_linkedin_post(SimpleNamespace(kind="post", topic="t", publish=True))
+    assert rc == 1
+    assert alerts and "linkedin" in alerts[0].lower()  # owner was emailed
+
+
+def test_cli_ok_on_success_and_skip(temp_db, monkeypatch):
+    import linkedin.poster as poster_mod
+    import main
+    import runlog
+
+    alerts: list[str] = []
+    monkeypatch.setattr(runlog, "send_alert", lambda subject, body: alerts.append(subject))
+
+    monkeypatch.setattr(
+        poster_mod, "post_to_linkedin",
+        lambda **kw: {"status": "published", "post_url": "https://li/x", "body": "x"},
+    )
+    assert main._cmd_linkedin_post(SimpleNamespace(kind="post", topic="t", publish=True)) == 0
+
+    monkeypatch.setattr(
+        poster_mod, "post_to_linkedin",
+        lambda **kw: {"status": "skipped", "reason": "daily cap reached (1)", "body": "x"},
+    )
+    assert main._cmd_linkedin_post(SimpleNamespace(kind="post", topic="t", publish=True)) == 0
+    assert alerts == []  # neither success nor skip alerts the owner
+
+
 def test_duplicate_content_is_skipped(temp_db, monkeypatch):
     first = _run(monkeypatch, publish=False, client=FakeLinkedIn())
     assert first["status"] == "draft"

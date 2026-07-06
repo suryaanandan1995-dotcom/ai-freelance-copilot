@@ -1,24 +1,25 @@
 name: LinkedIn Post
 
-# Scheduled weekly LinkedIn post. Publishes ONE fresh, RAG-grounded post to the
-# owner's OWN feed via the official LinkedIn Share API (w_member_social) — which is
-# ToS-compliant (original content, own account, official API). This is NOT the
-# auto-submit behaviour that gets banned (scraping / bot-submitting to other
-# accounts). Content comes from the same content engine used in the dashboard.
+# Scheduled LinkedIn posting — ONE post per weekday (Mon-Fri). Publishes a fresh,
+# RAG-grounded post to the owner's OWN feed via the official LinkedIn Share API
+# (w_member_social) — ToS-compliant (original content, own account, official API).
+# This is NOT the auto-submit behaviour that gets banned.
 #
-# IMPORTANT — token rotation: the LinkedIn access token expires (~60 days). When it
-# does, this workflow will fail with a 401 until you refresh COPILOT_LINKEDIN_ACCESS_TOKEN
-# (regenerate via the LinkedIn OAuth 2.0 tools screen, then update the repo secret).
+# FAILURE ALERTS: main.py runs this through record_run("linkedin", ...), which emails
+# the owner (SMTP secrets below) and fails the job if a publish errors — so an expired
+# access token (~every 60 days) pings you by email instead of silently going dark.
+#
+# TOKEN ROTATION: when COPILOT_LINKEDIN_ACCESS_TOKEN expires, regenerate it via the
+# LinkedIn OAuth 2.0 tools screen and update the repo secret.
 #
 # Required repo secrets:
-#   COPILOT_ANTHROPIC_API_KEY     (already set for outreach)
-#   COPILOT_LINKEDIN_ACCESS_TOKEN (OAuth token, w_member_social)
-#   COPILOT_LINKEDIN_AUTHOR_URN   (urn:li:person:<id>)
-#   COPILOT_DATABASE_URL          (optional; persistent Postgres for cross-run dedupe/cap)
+#   COPILOT_ANTHROPIC_API_KEY, COPILOT_LINKEDIN_ACCESS_TOKEN, COPILOT_LINKEDIN_AUTHOR_URN
+#   COPILOT_SMTP_HOST / COPILOT_SMTP_USER / COPILOT_SMTP_PASSWORD  (for failure alerts)
+#   COPILOT_DATABASE_URL  (optional; persistent Postgres for cross-run dedupe)
 
 on:
   schedule:
-    - cron: "0 9 * * 2"   # Tuesdays 09:00 UTC
+    - cron: "0 9 * * 1-5"   # every weekday (Mon-Fri) 09:00 UTC
   workflow_dispatch:
     inputs:
       topic:
@@ -35,7 +36,7 @@ concurrency:
 
 jobs:
   post:
-    name: Publish weekly LinkedIn post
+    name: Publish daily LinkedIn post
     runs-on: ubuntu-latest
     env:
       COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
@@ -44,6 +45,10 @@ jobs:
       COPILOT_LINKEDIN_AUTHOR_URN: ${{ secrets.COPILOT_LINKEDIN_AUTHOR_URN }}
       COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
       COPILOT_MAX_POSTS_PER_DAY: "1"
+      # SMTP so a failed publish (e.g. expired token) emails the owner an alert.
+      COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
+      COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
+      COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
 
     steps:
       - name: Checkout
@@ -60,9 +65,9 @@ jobs:
       - name: Build portfolio knowledge base
         run: python -m scripts.build_kb
 
-      - name: Publish one post (auto-rotated topic)
+      - name: Publish one post (topic rotates daily)
         run: |
-          # Rotate the angle each week so the feed stays varied. A manual
+          # Rotate the angle each DAY so a weekday cadence stays varied. A manual
           # workflow_dispatch can override via the `topic` input.
           TOPICS=(
             "shipping AI/LLM workloads securely on Kubernetes"
@@ -71,11 +76,17 @@ jobs:
             "Kubernetes security hardening and policy-as-code"
             "building a DevSecOps CI/CD pipeline with fail-closed vulnerability gates"
             "Terraform multi-cloud platform engineering done right"
+            "shift-left security: catching CVEs before they reach prod"
+            "autoscaling GPU inference on Kubernetes with vLLM"
+            "secrets management and zero-trust access with Keycloak + mTLS"
+            "observability that matters: SLOs, tracing, and cost signals"
+            "prompt-injection and PII guardrails for production LLM apps"
+            "platform engineering: golden paths that make the secure way the easy way"
           )
           TOPIC="${{ github.event.inputs.topic }}"
           if [ -z "$TOPIC" ]; then
-            WEEK=$(date +%V)
-            IDX=$(( 10#$WEEK % ${#TOPICS[@]} ))
+            DOY=$(date +%j)                       # day of year, 001-366
+            IDX=$(( 10#$DOY % ${#TOPICS[@]} ))    # 10# forces base-10 (avoid octal)
             TOPIC="${TOPICS[$IDX]}"
           fi
           echo "Topic: $TOPIC"
