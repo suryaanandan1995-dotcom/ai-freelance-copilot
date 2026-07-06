@@ -346,7 +346,7 @@ def test_hn_hiring_returns_empty_on_error(monkeypatch):
 # --------------------------------------------------------------------------
 def test_get_default_sources_includes_hn_freelancer():
     sources = registry.get_default_sources()
-    assert len(sources) == 6
+    assert len(sources) == 7
     assert all(isinstance(s, LeadSource) for s in sources)
     names = {s.name for s in sources}
     assert names == {
@@ -356,6 +356,7 @@ def test_get_default_sources_includes_hn_freelancer():
         "hn_hiring",
         "hn_freelancer",
         "reddit_forhire",
+        "jobicy",
     }
 
 
