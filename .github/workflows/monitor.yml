@@ -1,0 +1,49 @@
+name: Health Monitor
+
+# Autonomous health monitor ("doctor"). Runs daily, checks the whole system,
+# AUTO-HEALS safe issues (schema drift), and emails the owner a diagnosis for
+# anything that needs attention (DB unreachable, LinkedIn token expired, repeated
+# run failures). It never edits source code or safety flags.
+#
+# Required repo secrets:
+#   COPILOT_DATABASE_URL, COPILOT_LINKEDIN_ACCESS_TOKEN, COPILOT_LINKEDIN_AUTHOR_URN,
+#   COPILOT_SMTP_HOST / COPILOT_SMTP_USER / COPILOT_SMTP_PASSWORD (for the alert email)
+
+on:
+  schedule:
+    - cron: "30 7 * * *"   # daily 07:30 UTC (after the weekday 06:00 outreach)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    name: Run health monitor
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+      COPILOT_LINKEDIN_ACCESS_TOKEN: ${{ secrets.COPILOT_LINKEDIN_ACCESS_TOKEN }}
+      COPILOT_LINKEDIN_AUTHOR_URN: ${{ secrets.COPILOT_LINKEDIN_AUTHOR_URN }}
+      COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
+      COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
+      COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt psycopg2-binary
+
+      - name: Run health monitor
+        run: python main.py doctor

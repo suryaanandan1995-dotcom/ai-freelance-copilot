@@ -186,6 +186,18 @@ def _cmd_linkedin_post(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_doctor(_args: argparse.Namespace) -> int:
+    from monitor.doctor import format_report, run_healthcheck
+    from runlog import record_run
+
+    result = record_run("monitor", run_healthcheck)
+    print(format_report(result))
+    # Exit 0 even when issues are found: the monitor itself ran fine and already
+    # emailed a diagnosis. A non-zero code is reserved for the monitor crashing
+    # (record_run re-raises that). This keeps "issue found" distinct from "monitor broke".
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="copilot", description="AI Freelance Copilot")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -276,6 +288,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Actually publish to LinkedIn (default: draft only).",
     )
     p_li.set_defaults(func=_cmd_linkedin_post)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help=(
+            "Health monitor: checks DB, schema, recent run failures, and the "
+            "LinkedIn token; auto-heals schema drift; emails the owner a diagnosis "
+            "for anything that needs attention. Never edits source or safety flags."
+        ),
+    )
+    p_doctor.set_defaults(func=_cmd_doctor)
 
     return parser
 
