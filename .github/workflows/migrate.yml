@@ -1,0 +1,35 @@
+name: DB Migrate
+
+# One-shot, on-demand schema migration against the hosted database
+# (COPILOT_DATABASE_URL / Neon). Adds any model columns missing from existing
+# tables — fixes errors like "column outreach.replied does not exist" that happen
+# when a table was created by an older schema. Idempotent; safe to run anytime.
+#
+# Run it from the Actions tab -> "DB Migrate" -> "Run workflow".
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    name: Migrate hosted DB schema
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt psycopg2-binary
+
+      - name: Run migration
+        run: python -m scripts.migrate
