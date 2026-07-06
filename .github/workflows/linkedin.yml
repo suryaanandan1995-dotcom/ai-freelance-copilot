@@ -1,6 +1,6 @@
 name: LinkedIn Post
 
-# Scheduled LinkedIn posting — ONE post per weekday (Mon-Fri). Publishes a fresh,
+# Scheduled LinkedIn posting — ONE post on Mon / Wed / Fri. Publishes a fresh,
 # RAG-grounded post to the owner's OWN feed via the official LinkedIn Share API
 # (w_member_social) — ToS-compliant (original content, own account, official API).
 # This is NOT the auto-submit behaviour that gets banned.
@@ -19,7 +19,7 @@ name: LinkedIn Post
 
 on:
   schedule:
-    - cron: "0 9 * * 1-5"   # every weekday (Mon-Fri) 09:00 UTC
+    - cron: "0 9 * * 1,3,5"   # Mon / Wed / Fri 09:00 UTC
   workflow_dispatch:
     inputs:
       topic:
@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   post:
-    name: Publish daily LinkedIn post
+    name: Publish LinkedIn post (Mon/Wed/Fri)
     runs-on: ubuntu-latest
     env:
       COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
@@ -65,9 +65,10 @@ jobs:
       - name: Build portfolio knowledge base
         run: python -m scripts.build_kb
 
-      - name: Publish one post (topic rotates daily)
+      - name: Publish one post (topic rotates each run)
         run: |
-          # Rotate the angle each DAY so a weekday cadence stays varied. A manual
+          # Rotate the angle by day-of-year so Mon/Wed/Fri each get a different topic.
+          # A manual
           # workflow_dispatch can override via the `topic` input.
           TOPICS=(
             "shipping AI/LLM workloads securely on Kubernetes"
