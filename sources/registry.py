@@ -12,6 +12,7 @@ from sources.jobicy import JobicySource
 from sources.reddit_forhire import RedditForHireSource
 from sources.remote_boards import RemoteBoardsSource
 from sources.upwork_rss import UpworkRSSSource
+from sources.working_nomads import WorkingNomadsSource
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ def get_default_sources() -> list[LeadSource]:
         HNFreelancerSource(),
         RedditForHireSource(),
         JobicySource(),
+        WorkingNomadsSource(),
     ]
 
 
