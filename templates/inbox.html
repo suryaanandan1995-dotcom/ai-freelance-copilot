@@ -1,17 +1,19 @@
 {% extends "base.html" %}
 {% block title %}Inbox — AI Freelance Copilot{% endblock %}
 {% block content %}
-  <h1>Inbox — proposals awaiting your review</h1>
+  <h1>Monitor — leads &amp; drafted proposals</h1>
   <p class="muted">
-    Drafted &amp; approved leads, highest fit first. Nothing is ever auto-submitted to a
-    platform (that's a ToS/ban risk) — you approve here, then submit on the platform
-    yourself. Tick the ones that look good and <strong>Approve selected</strong> in one go.
+    Read-only view of what the pipeline is finding, highest fit first.
+    <strong>Your email outreach and LinkedIn posts already send automatically — nothing
+    here is waiting on you.</strong> Approval is <em>optional</em> and only relevant if
+    you ever choose to submit a proposal on a platform by hand (never automated — that's
+    a ToS/ban risk).
   </p>
 
   {% if leads %}
   <form method="post" action="/approve-bulk">
     <div class="row" style="gap:14px; align-items:center; margin-bottom:12px;">
-      <button type="submit" class="btn-accent">Approve selected</button>
+      <button type="submit" class="btn">Approve selected (optional)</button>
       <label class="muted" style="cursor:pointer;">
         <input type="checkbox" id="select-all"> Select all draft proposals
       </label>
