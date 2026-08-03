@@ -187,3 +187,93 @@ def test_retriever_returns_expected_source_for_kubernetes_security(tmp_path):
     # scores are sorted descending
     scores = [r["score"] for r in results]
     assert scores == sorted(scores, reverse=True)
+
+
+# --------------------------------------------------------------------------- #
+# rebuilding the KB must not delete what the KB learned
+# --------------------------------------------------------------------------- #
+def _write_portfolio(root, name: str = "some-project"):
+    repo = root / name
+    repo.mkdir(parents=True, exist_ok=True)
+    (repo / "README.md").write_text(SAMPLE_README, encoding="utf-8")
+    return root
+
+
+def test_rebuilding_the_kb_preserves_learned_wins(tmp_path):
+    """The defect this pins cost the whole win history every time a project was added.
+
+    ``append_winning_proposal_to_kb`` writes ``kind="win"`` docs straight into the JSON
+    store, and they exist nowhere else — no repo, no file, nothing to re-derive them
+    from. A rebuild that started from a bare store deleted every win permanently, and
+    the only symptom was that proposals quietly stopped citing what had actually closed.
+    That reads as the pitch getting worse, not as data loss, so it would never have been
+    traced back to `build-kb`.
+    """
+    repos = _write_portfolio(tmp_path / "repos")
+    store_path = str(tmp_path / "kb.json")
+    embedder = FakeEmbedder()
+
+    # A prior store containing one portfolio doc and one hard-won learned doc.
+    original = build_store(str(repos), embedder)
+    original.add([
+        {
+            "text": "The proposal that actually closed the ACME contract.",
+            "metadata": {"source": "won:ext-1", "kind": "win"},
+            "vector": embedder.embed("The proposal that actually closed the ACME contract."),
+        }
+    ])
+    original.save(store_path)
+
+    # A new project lands and the KB is rebuilt.
+    _write_portfolio(tmp_path / "repos", "newly-added-project")
+    rebuilt = build_store(str(repos), embedder, preserve_from=store_path)
+
+    kinds = [(d.get("metadata") or {}).get("kind") for d in rebuilt.docs]
+    sources = {(d.get("metadata") or {}).get("source") for d in rebuilt.docs}
+
+    assert "win" in kinds, "the rebuild dropped the learned win"
+    assert "won:ext-1" in sources
+    assert "newly-added-project" in sources  # and the new project is present
+
+
+def test_a_rebuild_without_a_previous_store_is_fine(tmp_path):
+    """First-ever build: nothing to preserve, and no error for the absence."""
+    repos = _write_portfolio(tmp_path / "repos")
+    store = build_store(str(repos), FakeEmbedder(), preserve_from=str(tmp_path / "absent.json"))
+
+    assert len(store) > 0
+    assert all((d.get("metadata") or {}).get("kind") != "win" for d in store.docs)
+
+
+def test_a_corrupt_previous_store_does_not_block_a_rebuild(tmp_path):
+    """Losing the wins is bad; being unable to rebuild at all is worse. A corrupt store
+    degrades to "no wins carried over", logged, rather than raising."""
+    repos = _write_portfolio(tmp_path / "repos")
+    bad = tmp_path / "corrupt.json"
+    bad.write_text("{not json at all", encoding="utf-8")
+
+    store = build_store(str(repos), FakeEmbedder(), preserve_from=str(bad))
+    assert len(store) > 0
+
+
+def test_only_learned_kinds_are_carried_over(tmp_path):
+    """Portfolio docs must NOT be carried across, or a deleted or renamed project would
+    linger in the KB forever and get cited in a pitch as current proof."""
+    repos = _write_portfolio(tmp_path / "repos")
+    store_path = str(tmp_path / "kb.json")
+    embedder = FakeEmbedder()
+
+    stale = build_store(str(repos), embedder)
+    stale.add([
+        {
+            "text": "A project that has since been deleted from the portfolio.",
+            "metadata": {"source": "deleted-project", "kind": "portfolio"},
+            "vector": embedder.embed("A project that has since been deleted."),
+        }
+    ])
+    stale.save(store_path)
+
+    rebuilt = build_store(str(repos), embedder, preserve_from=store_path)
+    sources = {(d.get("metadata") or {}).get("source") for d in rebuilt.docs}
+
+    assert "deleted-project" not in sources
