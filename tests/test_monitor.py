@@ -49,7 +49,18 @@ def test_all_healthy_no_alert(temp_db, monkeypatch):
     assert result["issues"] == []
     assert alerts == []  # nothing to alert
     names = {c["name"] for c in result["checks"]}
-    assert names == {"schema", "database", "recent_runs", "linkedin_token"}
+    assert names == {
+        "schema",
+        "database",
+        "recent_runs",
+        "linkedin_token",
+        # Output-based funnel checks (monitor/funnel.py): a run that "succeeds"
+        # while emailing nobody is the failure mode that went unnoticed for a
+        # month, so these must always be part of the healthcheck surface.
+        "outreach_flow",
+        "queue_flow",
+        "contactable_supply",
+    }
 
 
 def test_recent_failure_is_flagged_and_alerts(temp_db, monkeypatch):

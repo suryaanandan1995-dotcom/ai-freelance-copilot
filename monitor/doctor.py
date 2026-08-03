@@ -28,12 +28,29 @@ logger = logging.getLogger(__name__)
 
 
 def _check_schema() -> tuple[dict, list[str]]:
-    """Heal missing columns (safe auto-fix). Returns (check, auto_fixed)."""
+    """Heal missing columns (safe auto-fix), then VERIFY the heal. Returns (check, fixed).
+
+    Verification is the point. ``_ensure_columns`` swallows each failed ``ALTER TABLE``
+    by design, so this check used to report ``ok: up to date`` whenever the heal added
+    nothing — whether the schema was complete or the ALTERs had all failed. Those need
+    opposite responses, so the state is now read back from the database.
+    """
     try:
-        from db.session import _ensure_columns, engine, init_db
+        from db.session import _ensure_columns, engine, init_db, missing_columns
 
         init_db()
         added = _ensure_columns(engine)
+        still_missing = missing_columns(engine)
+        if still_missing:
+            return {
+                "name": "schema",
+                "ok": False,
+                "detail": (
+                    f"{len(still_missing)} column(s) missing and could not be added: "
+                    f"{', '.join(still_missing)} — queries touching them fail at "
+                    "runtime; check DDL permissions for the database user"
+                ),
+            }, added
         detail = f"healed {len(added)} column(s): {', '.join(added)}" if added else "up to date"
         return {"name": "schema", "ok": True, "detail": detail}, added
     except Exception as exc:  # noqa: BLE001
@@ -128,6 +145,16 @@ def run_healthcheck(alert: bool = True) -> dict:
     checks.append(_check_database())
     checks.append(_check_recent_runs())
     checks.append(_check_linkedin_token())
+    # Output-based checks: a run that exits 0 while emailing nobody is a failure
+    # this monitor previously could not see (24 such runs went unreported).
+    try:
+        from monitor.funnel import funnel_checks
+
+        checks.extend(funnel_checks())
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            {"name": "funnel", "ok": False, "detail": f"funnel checks failed: {exc}"}
+        )
 
     issues = [c["detail"] for c in checks if not c["ok"]]
     result = {"ok": not issues, "checks": checks, "auto_fixed": auto_fixed, "issues": issues}

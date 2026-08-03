@@ -92,6 +92,24 @@ def _cmd_stats(_args: argparse.Namespace) -> int:
         console.print(table)
     except Exception:
         print(stats)
+
+    # Status counts say what exists; KPIs say whether any of it worked. Printing only
+    # the former is how a month of zero replies looked like a healthy pipeline.
+    try:
+        from monitor.kpi import format_kpis, funnel
+
+        print()
+        print(format_kpis(funnel()))
+    except Exception as exc:  # noqa: BLE001
+        print(f"(KPIs unavailable: {exc})")
+    return 0
+
+
+def _cmd_kpi(args: argparse.Namespace) -> int:
+    """Print the outcome funnel: contactable -> emailed -> replied -> booked -> won."""
+    from monitor.kpi import format_kpis, funnel
+
+    print(format_kpis(funnel(window_days=args.days)))
     return 0
 
 
@@ -158,8 +176,19 @@ def _cmd_linkedin_post(args: argparse.Namespace) -> int:
     # (b) still prints what happened here.
     holder: dict = {}
 
+    # An empty --topic auto-rotates. The rotation used to live as a bash array in
+    # .github/workflows/linkedin.yml, where it was untestable and drifted away from
+    # what the pipeline targeted; content.topics is now the single source of truth.
+    topic = args.topic
+    if not topic:
+        import datetime as _date
+
+        from content.topics import topic_for_day
+
+        topic = topic_for_day(_date.date.today().timetuple().tm_yday)
+
     def _run() -> dict:
-        stats = post_to_linkedin(kind=args.kind, topic=args.topic, publish=args.publish)
+        stats = post_to_linkedin(kind=args.kind, topic=topic, publish=args.publish)
         holder.update(stats or {})
         if (stats or {}).get("status") == "failed":
             # Raise so record_run alerts the owner + the CI step goes red. A
@@ -232,6 +261,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_stats = sub.add_parser("stats", help="Print pipeline stats.")
     p_stats.set_defaults(func=_cmd_stats)
 
+    p_kpi = sub.add_parser(
+        "kpi",
+        help="Print outcome KPIs (contactable -> emailed -> replied -> booked -> won).",
+        description=(
+            "Reports what the system achieved, not that it ran. Names the bottleneck "
+            "stage so effort goes where it changes the outcome."
+        ),
+    )
+    p_kpi.add_argument(
+        "--days", type=int, default=30, help="Rolling window in days (default 30)."
+    )
+    p_kpi.set_defaults(func=_cmd_kpi)
+
     p_reply = sub.add_parser(
         "reply",
         help=(
@@ -281,7 +323,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_li.add_argument("--kind", choices=["post", "case-study", "gig"], default="post")
-    p_li.add_argument("--topic", default="", help="Topic / angle for the post.")
+    p_li.add_argument(
+        "--topic",
+        default="",
+        help="Topic / angle for the post. Blank auto-rotates via content.topics.",
+    )
     p_li.add_argument(
         "--publish",
         action="store_true",

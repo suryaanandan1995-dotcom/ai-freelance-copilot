@@ -26,17 +26,50 @@ def _lead_url(base: str, lead_id) -> str:
     return f"{base.rstrip('/')}/lead/{lead_id}"
 
 
+def _kpi_block() -> str:
+    """Rolling outcome KPIs, or '' if unavailable.
+
+    The digest used to report activity only (fetched/new/dropped), all of which looked
+    healthy through a month that produced 1 email and 0 replies. Outcomes now lead.
+    """
+    try:
+        from monitor.kpi import format_kpis, funnel
+
+        return format_kpis(funnel())
+    except Exception as exc:  # noqa: BLE001 - a digest must never fail on KPIs
+        logger.warning("notify: KPI block unavailable: %s", exc)
+        return ""
+
+
 def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
-    lines = [
-        "AI Freelance Copilot — pipeline digest",
-        "",
-        f"Fetched : {stats.get('fetched', 0)}",
-        f"New     : {stats.get('new', 0)}",
-        f"Queued  : {stats.get('queued', 0)}",
-        f"Dropped : {stats.get('dropped', 0)}",
-        f"Skipped : {stats.get('skipped', 0)}",
-        f"Cost    : ${stats.get('cost_usd', 0.0):.4f}",
+    lines = ["AI Freelance Copilot — pipeline digest", ""]
+
+    kpis = _kpi_block()
+    if kpis:
+        lines += [kpis, ""]
+
+    lines += [
+        "THIS RUN",
+        f"  Contactable : {stats.get('contactable', 0)}",
+        f"  Fetched     : {stats.get('fetched', 0)}",
+        f"  New         : {stats.get('new', 0)}",
+        f"  Queued      : {stats.get('queued', 0)}",
+        f"  Emailed     : {stats.get('emailed', 0)}",
+        f"  Dropped     : {stats.get('dropped', 0)}",
+        f"  Skipped     : {stats.get('skipped', 0)}",
+        f"  Cost        : ${stats.get('cost_usd', 0.0):.4f}",
     ]
+    skipped_reasons = stats.get("emailed_skipped") or {}
+    if skipped_reasons:
+        reasons = ", ".join(f"{k}={v}" for k, v in sorted(skipped_reasons.items()))
+        lines.append(f"  Not emailed : {reasons}")
+    fit = stats.get("fit") or {}
+    if fit.get("bottleneck"):
+        lines.append(
+            f"  Fit scores  : n={fit.get('n')} p50={fit.get('p50')} "
+            f"max={fit.get('max')} (bar {fit.get('threshold')})"
+        )
+        lines.append(f"  Bottleneck  : {fit['bottleneck']}")
     if stats.get("budget_exhausted"):
         lines.append("NOTE: per-run budget cap reached; run stopped early.")
     lines += ["", "Top leads awaiting your review:"]
@@ -65,17 +98,35 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
     note = ""
     if stats.get("budget_exhausted"):
         note = "<p><em>Per-run budget cap reached; run stopped early.</em></p>"
+    kpis = _kpi_block()
+    kpi_html = (
+        f'<h3>Outcomes</h3><pre style="background:#f6f8fa;padding:10px;'
+        f'border-radius:6px">{kpis}</pre>'
+        if kpis
+        else ""
+    )
+    fit = stats.get("fit") or {}
+    fit_html = (
+        f'<p style="color:#666"><strong>Bottleneck:</strong> {fit["bottleneck"]}</p>'
+        if fit.get("bottleneck")
+        else ""
+    )
     return f"""\
 <html><body style="font-family:system-ui,Arial,sans-serif">
 <h2>AI Freelance Copilot — pipeline digest</h2>
+{kpi_html}
+<h3>This run</h3>
 <ul>
+  <li>Contactable: {stats.get('contactable', 0)}</li>
   <li>Fetched: {stats.get('fetched', 0)}</li>
   <li>New: {stats.get('new', 0)}</li>
   <li>Queued: {stats.get('queued', 0)}</li>
+  <li>Emailed: {stats.get('emailed', 0)}</li>
   <li>Dropped: {stats.get('dropped', 0)}</li>
   <li>Skipped: {stats.get('skipped', 0)}</li>
   <li>Cost: ${stats.get('cost_usd', 0.0):.4f}</li>
 </ul>
+{fit_html}
 {note}
 <h3>Top leads awaiting your review</h3>
 <ol>{rows}</ol>
@@ -94,9 +145,18 @@ def _send_email(stats: dict, top_leads: list[dict]) -> bool:
     base_url = settings.dashboard_base_url
 
     msg = EmailMessage()
-    msg["Subject"] = (
-        f"[Copilot] {stats.get('queued', 0)} new proposal draft(s) to review"
-    )
+    # The subject is the only part guaranteed to be read. A queue count alone read as
+    # healthy for a month of zero sends, so surface sends + contactability too.
+    queued = stats.get("queued", 0)
+    emailed = stats.get("emailed", 0)
+    contactable = stats.get("contactable", 0)
+    if queued or emailed:
+        subject = f"[Copilot] {queued} draft(s), {emailed} email(s) sent"
+    elif contactable:
+        subject = f"[Copilot] NOTHING QUEUED — {contactable} contactable, 0 drafted"
+    else:
+        subject = "[Copilot] NO CONTACTABLE LEADS — sourcing needs attention"
+    msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = recipient
     msg.set_content(_plaintext(stats, top_leads, base_url))

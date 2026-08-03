@@ -108,6 +108,15 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
         logger.info("run_reply_pass: auto_reply disabled — no-op")
         return stats
 
+    # Every other DB-touching entrypoint (pipeline, followup, optimizer, dashboard)
+    # bootstraps the schema first; this one did not. ``record_run`` calls init_db only
+    # when persisting the RunRecord — i.e. AFTER this pass has already read/written
+    # ``outreach`` and ``replies``, which is exactly how a drifted column becomes a
+    # mid-run failure instead of a startup heal.
+    from db.session import init_db
+
+    init_db()
+
     # Imported here so tests can monkeypatch reply.inbox.fetch_replies cleanly and
     # so the module imports without live IMAP.
     from reply.inbox import fetch_replies
