@@ -92,8 +92,14 @@ class HNFreelancerSource(LeadSource):
             resp = client.get(
                 f"{self.base_url}/search_by_date",
                 params={
-                    "query": "Ask HN: Freelancer? Seeking Freelancer?",
-                    "tags": "story,author_whoishiring",
+                    "query": "Freelancer? Seeking freelancer?",
+                    # NOTE: do NOT pin author here. The ``whoishiring`` bot stopped
+                    # posting the freelancer thread after Oct 2025 (it is now posted
+                    # by a community member), so ``author_whoishiring`` silently
+                    # resolved to a stale 2025 story — which quietly turned this
+                    # source into a duplicate of hn_hiring on year-old salaried posts.
+                    "tags": "story",
+                    "restrictSearchableAttributes": "title",
                     "hitsPerPage": 1,
                 },
             )

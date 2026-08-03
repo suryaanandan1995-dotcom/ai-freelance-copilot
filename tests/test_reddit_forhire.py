@@ -138,6 +138,13 @@ def test_respects_limit(monkeypatch):
     assert len(src.fetch(limit=0)) == 0
 
 
-def test_registry_includes_reddit_forhire():
+def test_registry_excludes_reddit_forhire_until_oauth():
+    """The adapter still works (tests above), but is NOT wired in by default.
+
+    Measured 2026-08-03: 403 Blocked on 48/48 production fetches — Reddit blocks
+    unauthenticated ``.json`` from datacenter IPs, which is where CI runs. Keeping
+    it in the default registry cost a fetch every run for zero leads. Re-add it to
+    ``get_default_sources`` once OAuth credentials are configured.
+    """
     names = {s.name for s in get_default_sources()}
-    assert "reddit_forhire" in names
+    assert "reddit_forhire" not in names

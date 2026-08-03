@@ -65,30 +65,12 @@ jobs:
       - name: Build portfolio knowledge base
         run: python -m scripts.build_kb
 
+      # Topic rotation lives in content/topics.py (weighted toward AI-infra, agents
+      # and forward-deployed work, which is where UK contract demand is growing).
+      # It used to be a bash array here, which meant it was untestable and drifted
+      # out of sync with what the lead pipeline targets. An empty --topic
+      # auto-rotates by day-of-year; workflow_dispatch can still override it.
       - name: Publish one post (topic rotates each run)
         run: |
-          # Rotate the angle by day-of-year so Mon/Wed/Fri each get a different topic.
-          # A manual
-          # workflow_dispatch can override via the `topic` input.
-          TOPICS=(
-            "shipping AI/LLM workloads securely on Kubernetes"
-            "cutting cloud cost without slowing delivery"
-            "GitOps multi-environment promotion with ArgoCD"
-            "Kubernetes security hardening and policy-as-code"
-            "building a DevSecOps CI/CD pipeline with fail-closed vulnerability gates"
-            "Terraform multi-cloud platform engineering done right"
-            "shift-left security: catching CVEs before they reach prod"
-            "autoscaling GPU inference on Kubernetes with vLLM"
-            "secrets management and zero-trust access with Keycloak + mTLS"
-            "observability that matters: SLOs, tracing, and cost signals"
-            "prompt-injection and PII guardrails for production LLM apps"
-            "platform engineering: golden paths that make the secure way the easy way"
-          )
-          TOPIC="${{ github.event.inputs.topic }}"
-          if [ -z "$TOPIC" ]; then
-            DOY=$(date +%j)                       # day of year, 001-366
-            IDX=$(( 10#$DOY % ${#TOPICS[@]} ))    # 10# forces base-10 (avoid octal)
-            TOPIC="${TOPICS[$IDX]}"
-          fi
-          echo "Topic: $TOPIC"
-          python main.py linkedin-post --kind post --topic "$TOPIC" --publish
+          python main.py linkedin-post --kind post \
+            --topic "${{ github.event.inputs.topic }}" --publish

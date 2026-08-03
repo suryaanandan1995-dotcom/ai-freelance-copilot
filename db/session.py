@@ -67,10 +67,60 @@ def _ensure_columns(bind) -> list[str]:
     return added
 
 
+def missing_columns(bind) -> list[str]:
+    """``table.column`` entries the models define but the live DB still lacks.
+
+    Read-only counterpart to :func:`_ensure_columns`, and the reason it exists:
+    ``_ensure_columns`` deliberately swallows every ``ALTER TABLE`` failure so one
+    bad column can't block startup. That safety has a cost — a heal that *never
+    succeeds* (no DDL grant on a managed Postgres, a type the dialect won't accept)
+    looks identical to "nothing to do". Callers that report health must be able to
+    tell those apart, so ask the DB what is actually missing instead of inferring it
+    from what the heal claimed to add.
+
+    Returns [] when the schema is complete or cannot be inspected (never raises).
+    """
+    missing: list[str] = []
+    try:
+        insp = inspect(bind)
+        existing_tables = set(insp.get_table_names())
+    except Exception as exc:
+        logger.warning("missing_columns: could not inspect schema: %s", exc)
+        return missing
+
+    for table in Base.metadata.sorted_tables:
+        if table.name not in existing_tables:
+            missing.append(f"{table.name}.*")
+            continue
+        try:
+            have = {c["name"] for c in insp.get_columns(table.name)}
+        except Exception as exc:
+            logger.warning("missing_columns: could not read %s columns: %s", table.name, exc)
+            continue
+        missing.extend(f"{table.name}.{c.name}" for c in table.columns if c.name not in have)
+    return missing
+
+
 def init_db() -> None:
-    """Create missing tables, then backfill any missing columns on existing tables."""
+    """Create missing tables, backfill missing columns, and log anything still absent.
+
+    The log line matters: a column that could not be added will otherwise surface much
+    later as an opaque ``no such column`` mid-run (this is how a missing
+    ``outreach.replied`` took down the optimizer), with nothing at startup pointing at
+    the schema. Still non-fatal — most of the system works with a partial schema, and
+    refusing to boot would turn one broken column into total unavailability.
+    """
     Base.metadata.create_all(engine)
     _ensure_columns(engine)
+    still_missing = missing_columns(engine)
+    if still_missing:
+        logger.error(
+            "init_db: %d column(s) could not be created and are STILL MISSING: %s — "
+            "queries touching them will fail at runtime. Check DDL permissions on the "
+            "database user.",
+            len(still_missing),
+            ", ".join(still_missing),
+        )
 
 
 @contextmanager

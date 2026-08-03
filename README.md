@@ -67,12 +67,17 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 
 | Source | What it reads |
 |--------|---------------|
+| **HN "Who is hiring"** | The two most recent monthly Hacker News hiring threads (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. Comments are ranked by *contact-hint then AI-infra relevance* **before** the per-run limit truncates them, so the leads that survive are the ones that can actually be emailed. |
+| **HN "Freelancer? Seeking freelancer?"** | The companion monthly thread, where the poster is explicitly hiring a contractor. |
+| **UK day-rate contract** *(optional)* | Adzuna's official UK jobs API, `contract_only=1` — the segment that actually pays day rates (£525–£550/day DevOps, **£550 median for LLM roles with vacancies up +247% YoY**). Off unless you set `COPILOT_ADZUNA_APP_ID` + `COPILOT_ADZUNA_APP_KEY` (free key: [developer.adzuna.com](https://developer.adzuna.com)); returns nothing, with a log line, when unconfigured. |
 | **Remote boards** | RemoteOK, WeWorkRemotely & Remotive feeds — works out of the box, no config. |
-| **Contra / startup** | Startup-oriented opportunity feeds (configurable via `COPILOT_STARTUP_FEEDS`). |
-| **HN "Who is hiring"** | The monthly Hacker News hiring thread (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. |
+| **Jobicy / Working Nomads** | Two further remote-jobs feeds, no config. |
+| **Contra / startup** | Startup-oriented opportunity feeds (configurable via `COPILOT_STARTUP_FEEDS`), deduped across feeds since aggregators syndicate each other. |
 | **Upwork RSS** *(optional)* | Upwork **discontinued public RSS on 2024-08-20**, so this is off by default. Set `COPILOT_UPWORK_FEEDS` only if you have a third-party RSS bridge; otherwise use Upwork's native saved-search alerts and bid manually. The adapter returns nothing (no error) when unconfigured. |
 
-> Most board listings (Upwork, LinkedIn, remote boards) link back to a platform and expose **no direct email**, so they stay human-submit. Hacker News "Who is hiring" comments are the exception — and the only place the auto-email channel sends to.
+> Most board listings (Upwork, LinkedIn, remote boards) link back to a platform and expose **no direct email**, so they stay human-submit. The Hacker News threads are the exception — and the only place the auto-email channel sends to.
+>
+> **`reddit_forhire` was removed, not disabled.** Reddit began returning `403 Blocked` to unauthenticated JSON requests; the adapter contributed nothing but a failing HTTP call on every run for a month. A source that cannot fetch is deleted rather than left in the registry looking operational.
 
 ## Auto-Email Outreach
 
@@ -150,6 +155,50 @@ Run it: `python main.py dashboard` → `http://localhost:8000`. The same data is
 ## Cost Guardrail
 
 Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$2.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
+
+## Outcome Reporting
+
+Uptime is not a result. The first production month of this pipeline exited **green on
+every scheduled run** while producing 1 email, 0 replies, 0 calls and 0 projects, for
+$8.55 — because every reported number was an *activity* count (fetched / new / dropped)
+and all of them looked healthy. Activity metrics cannot fail the way this system failed.
+
+So [`monitor/kpi.py`](monitor/kpi.py) reports the funnel in outcome terms over a rolling
+window, and names the bottleneck stage:
+
+```bash
+python main.py kpi --days 30
+```
+
+```text
+OUTCOMES — last 30 days
+  contactable     41
+  emailed         18
+  replied         2   (11.1%)
+  calls booked    1   (50.0%)
+  won             0   (n/a)
+  spend           $6.41
+  per reply       $3.21
+
+1 call(s) booked, none won yet. The machine is working; the remaining variable is the call itself.
+```
+
+Three deliberate choices in there:
+
+- **The verdict is ordered top-down.** An empty top-of-funnel outranks an empty
+  downstream stage, because tuning a pitch nobody received cannot change the outcome —
+  which is exactly what a month of prompt-tuning against zero contactable leads
+  achieved.
+- **A rate with no denominator reports `(n/a)`, not `0.0%`.** "0% reply rate" invites
+  rewriting a pitch; "n/a" correctly says nobody was emailed.
+- **The digest subject carries the outcome.** `[Copilot] NO CONTACTABLE LEADS — sourcing
+  needs attention` cannot be mistaken for a normal run in an inbox; `12 drafts queued`
+  was, seventeen times.
+
+Each run also reports its **fit-score distribution** rather than a bare `dropped: 34`,
+since that number has two causes needing opposite fixes: scores clustered just below the
+threshold mean the threshold is too strict, scores far below it mean the sources are
+off-ICP.
 
 ## Observability
 
@@ -265,6 +314,11 @@ All variables are prefixed `COPILOT_` (see [`.env.example`](.env.example)).
 | `COPILOT_WHATSAPP_TOKEN` / `_PHONE_ID` / `_TO` | _empty_ | WhatsApp Business Cloud API. |
 | `COPILOT_RAG_STORE_PATH` | `data/portfolio_kb.json` | Vector store path. |
 | `COPILOT_OWNER_*` | Surya A | Identity used in proposals/signature. |
+| `COPILOT_ADZUNA_APP_ID` / `_APP_KEY` | _empty_ | Free Adzuna API credentials ([developer.adzuna.com](https://developer.adzuna.com)) enabling the UK day-rate contract source. Unset = that source is skipped. |
+| `COPILOT_VERIFY_CONTACT_DOMAIN` | `true` | Require the contact domain to publish MX/A records before sending. Protects sender reputation — the one asset cold outreach cannot rebuy. Set `false` only for offline tests/dev. |
+| `COPILOT_REQUIRE_CONTACT_BEFORE_DRAFT` | `true` | Drop leads with no reachable email **before** spending Opus tokens drafting to them. |
+| `COPILOT_ALERT_AFTER_ZERO_EMAIL_RUNS` | `3` | Consecutive zero-email runs before the health monitor alerts. |
+| `COPILOT_CAL_WEBHOOK_SECRET` | _empty_ | HMAC secret for the cal.com booking webhook; blank skips verification (dev only). |
 
 ## Deployment
 

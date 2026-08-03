@@ -14,3 +14,7 @@ build/
 *.egg-info/
 .DS_Store
 deploy/certs/
+
+# Runtime logs — uvicorn/pipeline output, not source. Was tracked, so every
+# local dashboard start showed up as a spurious diff.
+*.log

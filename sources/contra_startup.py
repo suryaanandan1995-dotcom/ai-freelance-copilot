@@ -27,13 +27,21 @@ import feedparser
 
 from core.schemas import Lead
 from sources._keywords import extract_tags
-from sources.base import LeadSource
+from sources.base import LeadSource, dedupe
 
 logger = logging.getLogger(__name__)
 
-#: A public, stable default feed (Remotive's software-dev RSS) so the adapter
-#: works out of the box even before the user configures their own boards.
-DEFAULT_FEED = "https://remotive.com/remote-jobs/feed/software-dev"
+#: Public, stable default feeds so the adapter works out of the box before the
+#: user configures their own boards. These are deliberately *category-scoped* to
+#: the DevOps/infra niche — the previous generic ``software-dev`` default mostly
+#: returned front-end/mobile roles that every keyword filter then discarded, so
+#: this source contributed nothing while still costing a fetch each run.
+DEFAULT_FEEDS = (
+    "https://remotive.com/remote-jobs/feed/devops",
+    "https://nodesk.co/remote-jobs/engineering/index.xml",
+)
+#: Back-compat alias — some callers/tests import the single-feed name.
+DEFAULT_FEED = DEFAULT_FEEDS[0]
 
 
 def _env_feeds() -> list[str]:
@@ -49,7 +57,7 @@ class ContraStartupSource(LeadSource):
             self.feeds = feeds
         else:
             env = _env_feeds()
-            self.feeds = env if env else [DEFAULT_FEED]
+            self.feeds = env if env else list(DEFAULT_FEEDS)
 
     def _entry_to_lead(self, entry: object) -> Lead | None:
         get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
@@ -94,4 +102,7 @@ class ContraStartupSource(LeadSource):
                     continue
                 if lead is not None:
                     leads.append(lead)
-        return leads[:limit]
+        # Now that several feeds are read, the same posting can arrive twice
+        # (aggregators syndicate each other). Dedupe here rather than relying on
+        # the registry, so ``limit`` counts distinct leads.
+        return dedupe(leads)[:limit]

@@ -163,3 +163,60 @@ def test_followup_is_short_and_nonempty():
                                "no rush, happy to help whenever it's useful."])
     msg = draft_followup(_lead(), days_since=5, chat=chat)
     assert isinstance(msg, str) and msg.strip()
+
+
+# --------------------------------------------------------------------------- #
+# qualifier: citable portfolio projects are derived, not hand-maintained
+# --------------------------------------------------------------------------- #
+def test_portfolio_projects_come_from_the_rag_store():
+    """The hard-coded list had drifted: 4 names, one of which did not exist, while
+    8 real repos (including every AI-infra one) were missing. Since matched_projects
+    is filtered against this list, the qualifier could not cite its best evidence."""
+    from agents.qualifier import portfolio_projects
+
+    projects = portfolio_projects()
+    assert len(projects) >= 10
+    # AI-infra repos — the premium segment — must be citable.
+    for repo in ("rag-platform-k8s", "llm-inference-k8s", "agentic-sre-platform"):
+        assert repo in projects
+    # The phantom repo must never come back.
+    assert "devsecops-pipeline-templates" not in projects
+
+
+def test_portfolio_projects_exclude_non_repo_kb_sources():
+    """The KB also holds achievements and won-project notes; offering those as
+    "repos" would put a non-existent link in a proposal."""
+    from agents.qualifier import portfolio_projects
+
+    projects = portfolio_projects()
+    assert "achievements" not in projects
+    assert not any(":" in p for p in projects)  # e.g. "won:ext-1"
+
+
+def test_portfolio_projects_falls_back_when_store_missing(monkeypatch):
+    import config
+    from agents import qualifier
+
+    real = config.get_settings
+
+    def s():
+        cfg = real()
+        cfg.rag_store_path = "/nonexistent/kb.json"
+        return cfg
+
+    monkeypatch.setattr(qualifier, "get_settings", s)
+    projects = qualifier.portfolio_projects()
+    assert projects == qualifier._FALLBACK_PROJECTS
+    assert "rag-platform-k8s" in projects
+
+
+def test_qualifier_prompt_names_the_target_segments():
+    """A lead is scored against this prompt; omitting a segment scores it low."""
+    from agents.qualifier import SKILLS, _system_prompt, portfolio_projects
+
+    prompt = _system_prompt(portfolio_projects())
+    low = (SKILLS + prompt).lower()
+    for segment in ("llm", "agent", "forward-deployed", "kubernetes", "devsecops"):
+        assert segment in low
+    # And it must warn off the measured false positives.
+    assert "customer service" in prompt.lower()
