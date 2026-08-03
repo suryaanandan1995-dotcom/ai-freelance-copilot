@@ -30,7 +30,9 @@ def main() -> None:
     args = parser.parse_args()
 
     embedder = get_embedder(use_real=args.real)
-    store = build_store(args.repos, embedder)
+    # Pass the output path in so learned docs (winning proposals, which exist only in
+    # the store) survive the rebuild instead of being silently deleted by it.
+    store = build_store(args.repos, embedder, preserve_from=args.out)
     store.save(args.out)
 
     kinds = Counter(d.get("metadata", {}).get("kind", "?") for d in store.docs)
@@ -43,6 +45,8 @@ def main() -> None:
     print(f"  chunks   : {len(store)}")
     print(f"  by kind  : {dict(kinds)}")
     print(f"  sources  : {len(sources)} -> {', '.join(sources)}")
+    if kinds.get("win"):
+        print(f"  preserved: {kinds['win']} learned win doc(s) carried over from the old store")
 
 
 if __name__ == "__main__":
