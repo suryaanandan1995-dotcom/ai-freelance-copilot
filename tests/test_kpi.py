@@ -61,7 +61,7 @@ def _seed(
                     last_contact_at=when,
                 )
             )
-        for i in range(runs):
+        for _ in range(runs):
             session.add(
                 RunRecord(
                     workflow="outreach",

@@ -127,7 +127,7 @@ def test_maps_contract_jobs_to_leads(creds, monkeypatch):
     src = UKContractSource(queries=("devops",), locations=("London",))
     leads = src.fetch(limit=10)
 
-    assert [l.external_id for l in leads] == ["1001", "1002"]  # sales role dropped
+    assert [lead.external_id for lead in leads] == ["1001", "1002"]  # sales role dropped
     lead = leads[0]
     assert isinstance(lead, Lead)
     assert lead.source == "uk_contract"
@@ -142,14 +142,14 @@ def test_maps_contract_jobs_to_leads(creds, monkeypatch):
 def test_offtopic_listing_is_filtered(creds, monkeypatch):
     _install(monkeypatch, PAYLOAD)
     src = UKContractSource(queries=("devops",), locations=("London",))
-    assert "1003" not in {l.external_id for l in src.fetch(limit=10)}
+    assert "1003" not in {lead.external_id for lead in src.fetch(limit=10)}
 
 
 def test_ai_infra_listing_is_kept(creds, monkeypatch):
     """The growth segment (LLM/RAG contract roles, +247% YoY) must not be dropped."""
     _install(monkeypatch, PAYLOAD)
     src = UKContractSource(queries=("llm",), locations=("London",))
-    llm = [l for l in src.fetch(limit=10) if l.external_id == "1002"]
+    llm = [lead for lead in src.fetch(limit=10) if lead.external_id == "1002"]
     assert llm, "LLM platform role should qualify"
     assert "llm" in llm[0].tags or "rag" in llm[0].tags
 
@@ -162,7 +162,7 @@ def test_budget_keeps_annualised_range_not_a_guessed_day_rate(creds, monkeypatch
     number in a proposal, which is worse than omitting it."""
     _install(monkeypatch, PAYLOAD)
     src = UKContractSource(queries=("devops",), locations=("London",))
-    by_id = {l.external_id: l for l in src.fetch(limit=10)}
+    by_id = {lead.external_id: lead for lead in src.fetch(limit=10)}
 
     assert by_id["1001"].budget == "£130,000-£143,000 (annualised)"
     assert by_id["1002"].budget == "£150,000 (annualised)"  # collapsed equal bounds
@@ -211,7 +211,7 @@ def test_dedupes_the_same_job_across_queries(creds, monkeypatch):
     """London and UK searches overlap heavily; one job must yield one lead."""
     _install(monkeypatch, PAYLOAD)
     src = UKContractSource(queries=("devops", "sre"), locations=("London", "UK"))
-    ids = [l.external_id for l in src.fetch(limit=50)]
+    ids = [lead.external_id for lead in src.fetch(limit=50)]
     assert ids == sorted(set(ids), key=ids.index)
     assert len(ids) == 2
 

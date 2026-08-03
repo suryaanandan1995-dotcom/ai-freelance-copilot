@@ -199,7 +199,7 @@ class HNWhoIsHiringSource(LeadSource):
                 "(%d of the kept have a contact hint)",
                 len(candidates),
                 limit,
-                sum(1 for l in kept if _has_contact_hint(l.description or "")),
+                sum(1 for lead in kept if _has_contact_hint(lead.description or "")),
             )
             candidates = kept
         return candidates
