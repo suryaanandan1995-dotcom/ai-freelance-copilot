@@ -70,12 +70,12 @@ def _maybe_email_lead(
     suppression, daily cap) are enforced here. Never raises for control flow.
     """
     from db.models import OutreachRecord
-    from outreach.extract import find_contact_email
+    from outreach.extract import find_deliverable_email
     from outreach.pitch import draft_email
     from outreach.sender import send_outreach
     from outreach.suppression import is_suppressed
 
-    email = find_contact_email(lead)
+    email = find_deliverable_email(lead)
     if not email:
         return "no_email"
     if fit_score < settings.outreach_min_fit:
@@ -116,6 +116,55 @@ def _maybe_email_lead(
     return "sent" if sent else "send_failed"
 
 
+def _fit_summary(scores: list[int], threshold: int) -> dict:
+    """Summarise the run's fit-score distribution and name the likely bottleneck.
+
+    ``dropped: 34`` on its own is unactionable. The two causes need opposite fixes:
+
+    * scores clustered just *below* the threshold  -> the threshold is too strict;
+    * scores clustered far below it                -> the sources are off-ICP.
+
+    ``near_miss`` (within 10 points of the threshold) is the number that decides
+    which one it is, so it is computed here rather than left to be eyeballed.
+    """
+    if not scores:
+        return {"n": 0, "bottleneck": "no leads scored"}
+
+    ordered = sorted(scores)
+    n = len(ordered)
+
+    def pct(p: float) -> int:
+        return ordered[min(n - 1, max(0, int(round(p * (n - 1)))))]
+
+    passed = sum(1 for s in ordered if s >= threshold)
+    near_miss = sum(1 for s in ordered if threshold - 10 <= s < threshold)
+
+    if passed:
+        bottleneck = "none — leads are clearing the bar"
+    elif near_miss >= max(2, n // 5):
+        bottleneck = (
+            f"threshold: {near_miss}/{n} scored within 10 points of {threshold}. "
+            "Lowering min_fit_score is likely to help more than changing sources."
+        )
+    else:
+        bottleneck = (
+            f"sources: 0/{n} cleared {threshold} and only {near_miss} came close. "
+            "The lead mix is off-ICP; fix targeting, not the threshold."
+        )
+
+    return {
+        "n": n,
+        "threshold": threshold,
+        "min": ordered[0],
+        "p50": pct(0.5),
+        "p90": pct(0.9),
+        "max": ordered[-1],
+        "passed": passed,
+        "near_miss": near_miss,
+        "bottleneck": bottleneck,
+    }
+
+
 def run_pipeline(
     limit: int | None = None,
     sources: list | None = None,
@@ -151,6 +200,16 @@ def run_pipeline(
     emailed_skipped: dict[str, int] = {}
     budget_exhausted = False
     queued_leads: list[dict] = []
+    # Contactability is measured for EVERY new lead, before any LLM spend, because
+    # it is the funnel's real bottleneck: 18 of 25 drafted proposals were discarded
+    # at the contact step after being fully researched and written at Opus prices.
+    contactable = 0
+    uncontactable_skipped = 0
+    # Every fit score seen this run. Without this, "dropped: 34" is unactionable:
+    # a run cannot tell you whether 34 leads scored 68 (threshold too strict) or 12
+    # (sources off-ICP), which are opposite fixes. Recorded so min_fit_score can be
+    # tuned from evidence instead of guessed.
+    fit_scores: list[int] = []
 
     def _skip_email(reason: str) -> None:
         emailed_skipped[reason] = emailed_skipped.get(reason, 0) + 1
@@ -186,6 +245,27 @@ def run_pipeline(
                 continue
 
             new += 1
+
+            # --- cheap gates BEFORE any LLM spend ---------------------------
+            # Extracting a contact costs one regex pass + one cached DNS lookup;
+            # researching and drafting costs Opus tokens. Doing them in that order
+            # is the difference between paying to discover a lead is unsendable and
+            # discovering it for free. Only applies when auto-emailing is the goal —
+            # with auto_email off, drafts for human submission are still valuable.
+            has_contact = False
+            try:
+                from outreach.extract import find_deliverable_email
+
+                has_contact = find_deliverable_email(lead) is not None
+            except Exception as exc:  # extraction must never break the loop
+                logger.warning("contact pre-check failed for %s: %s", lead.url, exc)
+            if has_contact:
+                contactable += 1
+            elif auto_email and settings.require_contact_before_draft:
+                uncontactable_skipped += 1
+                _skip_email("no_email_pregate")
+                continue
+
             try:
                 state = run_lead(lead, retriever=retriever, chat=chat)
             except BudgetExhausted:
@@ -196,6 +276,7 @@ def run_pipeline(
             scored = state.get("scored") or {}
             fit_score = int(scored.get("fit_score", 0))
             if scored:
+                fit_scores.append(fit_score)
                 metrics.observe("fit_score", fit_score)
                 if fit_score >= settings.min_fit_score:
                     metrics.inc("leads_qualified_total")
@@ -273,6 +354,11 @@ def run_pipeline(
     stats = {
         "fetched": fetched,
         "new": new,
+        # `contactable` is the leading indicator for this whole system: no amount of
+        # proposal quality matters if nothing is reachable. Surfaced as a top-level
+        # stat (not buried in emailed_skipped) so the weekly review can act on it.
+        "contactable": contactable,
+        "uncontactable_skipped": uncontactable_skipped,
         "queued": queued,
         "dropped": dropped,
         "skipped": skipped,
@@ -281,6 +367,7 @@ def run_pipeline(
         "cost_usd": tracker.usd(),
         "budget_exhausted": budget_exhausted,
     }
+    stats["fit"] = _fit_summary(fit_scores, settings.min_fit_score)
 
     if notify:
         try:

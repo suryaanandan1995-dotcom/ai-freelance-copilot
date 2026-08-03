@@ -44,6 +44,23 @@ class Settings(BaseSettings):
     # --- pipeline policy ---
     min_fit_score: int = 70          # leads below this are dropped
     max_leads_per_run: int = 50
+    # Skip research+drafting for leads with no deliverable contact when the goal is
+    # auto-email. 18 of 25 drafted proposals were thrown away at the contact step
+    # after being paid for at Opus prices; checking first costs a regex + a cached
+    # DNS lookup. Set False to keep drafting everything for human submission.
+    require_contact_before_draft: bool = True
+    # Require the contact domain to publish MX/A records before sending. Protects
+    # sender reputation (the one asset cold outreach cannot rebuy). Disable only
+    # for offline tests/dev, where fixture domains like "acme.io" don't resolve.
+    verify_contact_domain: bool = True
+
+    # --- run-health alerting (see monitor/health.py) ---
+    # Every one of 24 production runs reported "success" while sending nothing,
+    # because "sent 0 emails" was never an error condition. These thresholds turn
+    # a silently idle funnel into a failed run that emails the owner.
+    alert_after_zero_email_runs: int = 3   # consecutive runs with emailed == 0
+    alert_after_zero_queue_runs: int = 5   # consecutive runs with queued == 0
+    min_contactable_per_run: int = 1       # below this, the top of funnel is broken
     max_proposals_per_day: int = 15  # anti-spam guard
     max_usd_per_run: float = 2.0     # hard Claude-spend cap per pipeline run
 

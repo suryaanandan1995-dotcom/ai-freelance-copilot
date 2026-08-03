@@ -225,3 +225,53 @@ def test_pipeline_stats_and_top_queued(temp_db):
     top = top_queued(n=5)
     assert len(top) == 2
     assert top[0]["fit_score"] == 90
+
+
+# --------------------------------------------------------------------------- #
+# fit-score distribution: making "dropped: N" actionable
+# --------------------------------------------------------------------------- #
+def test_fit_summary_blames_the_threshold_on_near_misses():
+    """Scores bunched just under the bar mean the bar is wrong, not the sources."""
+    from pipeline import _fit_summary
+
+    s = _fit_summary([62, 64, 65, 67, 68, 69], threshold=70)
+    assert s["passed"] == 0
+    assert s["near_miss"] == 6
+    assert "threshold" in s["bottleneck"]
+    assert "min_fit_score" in s["bottleneck"]
+
+
+def test_fit_summary_blames_the_sources_when_scores_are_far_below():
+    from pipeline import _fit_summary
+
+    s = _fit_summary([5, 8, 12, 15, 20, 22], threshold=70)
+    assert s["near_miss"] == 0
+    assert "sources" in s["bottleneck"]
+    assert "off-ICP" in s["bottleneck"]
+
+
+def test_fit_summary_reports_no_bottleneck_when_leads_pass():
+    from pipeline import _fit_summary
+
+    s = _fit_summary([40, 75, 90], threshold=70)
+    assert s["passed"] == 2
+    assert "none" in s["bottleneck"]
+
+
+def test_fit_summary_percentiles_and_bounds():
+    from pipeline import _fit_summary
+
+    s = _fit_summary([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], threshold=70)
+    assert s["n"] == 10
+    assert s["min"] == 10 and s["max"] == 100
+    assert 50 <= s["p50"] <= 60
+    assert s["p90"] >= 90
+
+
+def test_fit_summary_handles_empty_and_single():
+    from pipeline import _fit_summary
+
+    assert _fit_summary([], threshold=70)["n"] == 0
+    single = _fit_summary([73], threshold=70)
+    assert single["min"] == single["max"] == single["p50"] == 73
+    assert single["passed"] == 1

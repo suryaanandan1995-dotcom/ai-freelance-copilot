@@ -131,3 +131,79 @@ def find_contact_email(lead: Lead) -> str | None:
                 if _is_good_email(email):
                     return email
     return None
+
+
+# --- deliverability verification ------------------------------------------------
+#
+# Measured context: of 25 fully-researched, fully-drafted proposals, 18 died at
+# the contact step ("no_email"). Emailing a domain that cannot receive mail burns
+# sender reputation, which is the one asset a cold-outreach system cannot rebuy —
+# so an address is only considered sendable if its domain publishes MX (or A)
+# records. This is a DNS lookup, not an SMTP probe: no connection is made to the
+# recipient's mail server, so it is invisible to them and costs nothing.
+
+_MX_CACHE: dict[str, bool] = {}
+
+
+def domain_accepts_mail(domain: str) -> bool:
+    """True if ``domain`` publishes MX (or fallback A) records.
+
+    Cached per-process. Fails **open** on resolver errors: a DNS hiccup should not
+    silently discard a real lead, since a bad send merely bounces while a wrongly
+    discarded lead is invisible.
+    """
+    domain = (domain or "").strip().lower().rstrip(".")
+    if not domain or "." not in domain:
+        return False
+    if domain in _MX_CACHE:
+        return _MX_CACHE[domain]
+
+    ok = True
+    try:  # dnspython is optional — degrade to a plain A-record check without it.
+        import dns.resolver  # type: ignore[import-untyped]
+
+        try:
+            answers = dns.resolver.resolve(domain, "MX")
+            ok = bool(list(answers))
+        except Exception:
+            try:
+                dns.resolver.resolve(domain, "A")
+                ok = True
+            except Exception:
+                ok = False
+    except ImportError:
+        import socket
+
+        try:
+            socket.getaddrinfo(domain, None)
+            ok = True
+        except Exception:
+            ok = False
+    except Exception:  # pragma: no cover - resolver misconfiguration: fail open
+        ok = True
+
+    _MX_CACHE[domain] = ok
+    return ok
+
+
+def find_deliverable_email(lead: Lead) -> str | None:
+    """Like :func:`find_contact_email`, but also require a mail-accepting domain.
+
+    The DNS check is skipped when ``COPILOT_VERIFY_CONTACT_DOMAIN=false`` so that
+    the test suite (and offline dev) stays hermetic — fixture domains like
+    ``acme.io`` don't resolve, and a unit test must not depend on a resolver.
+    """
+    email = find_contact_email(lead)
+    if not email:
+        return None
+    try:
+        from config import get_settings
+
+        if not get_settings().verify_contact_domain:
+            return email
+    except Exception:  # pragma: no cover - config unavailable: stay strict
+        pass
+    _, _, domain = email.partition("@")
+    if not domain_accepts_mail(domain):
+        return None
+    return email
