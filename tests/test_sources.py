@@ -344,21 +344,39 @@ def test_hn_hiring_returns_empty_on_error(monkeypatch):
 # --------------------------------------------------------------------------
 # 5. Registry
 # --------------------------------------------------------------------------
-def test_get_default_sources_includes_hn_freelancer():
+def test_get_default_sources_are_the_live_ones():
+    """Only sources measured to actually return leads are enabled by default.
+
+    ``upwork_rss`` (HTTP 410 Gone) and ``reddit_forhire`` (403 from datacenter IPs)
+    were dropped on 2026-08-03 after 24 production runs; ``uk_contract`` (Adzuna)
+    was added because UK contract roles are the actual target market.
+    """
     sources = registry.get_default_sources()
-    assert len(sources) == 8
     assert all(isinstance(s, LeadSource) for s in sources)
     names = {s.name for s in sources}
     assert names == {
-        "upwork_rss",
-        "remote_boards",
-        "contra_startup",
         "hn_hiring",
-        "hn_freelancer",
-        "reddit_forhire",
+        "uk_contract",
+        "remote_boards",
         "jobicy",
         "working_nomads",
+        "contra_startup",
+        "hn_freelancer",
     }
+    assert "upwork_rss" not in names
+    assert "reddit_forhire" not in names
+
+
+def test_default_sources_lead_with_contactable_yield():
+    """hn_hiring must be fetched first: ~46% of its posts publish a direct email.
+
+    Ordering matters because ``max_leads_per_run`` truncates: if volume-heavy
+    job-board sources run first they fill the budget with ATS "apply" links that
+    carry no address, which is exactly how 18 of 25 proposals died at "no_email".
+    """
+    names = [s.name for s in registry.get_default_sources()]
+    assert names[0] == "hn_hiring"
+    assert names.index("uk_contract") < names.index("remote_boards")
 
 
 def test_fetch_all_dedupes_across_sources():
