@@ -218,6 +218,7 @@ The five verdicts are deliberately distinct failures, not severity grades:
 | verdict | meaning | fix |
 | --- | --- | --- |
 | `dead` | fetched nothing at all | credentials, or the endpoint is gone |
+| `starved` | fetched leads, none survived the run cap | raise `max_leads_per_run` |
 | `stale` | fetched only leads already in the DB | widen the query, or retire it |
 | `unreachable` | real new leads, none with an email | stop paying to score it |
 | `unscored` | pre-gated before reaching the model | check the pre-gates |
@@ -231,6 +232,15 @@ Two properties matter more than the table itself:
   expose. `uk_contract` sat `DISABLED` through a month of green runs.
 - **Dead sources sort above working ones, and reach the subject line.** A run that queues
   three drafts *and* has a broken source used to read as unqualified success.
+
+The `starved` verdict exists because the first version of this report **got it wrong on
+its first live run**: it counted `fetched` *after* the run cap, and `fetch_all`
+concatenates sources in registry order, so the cap took a prefix — everything from source
+#1 and nothing from the rest. Six of seven sources were reported `dead: fetched nothing`
+when they had never been reached. A wrong verdict is worse than a missing one, because it
+gets acted on: the fix would have been to debug six healthy sources. `fetched` is now
+counted before the cap, the cap **interleaves** across sources instead of truncating a
+prefix, and being cut off by the cap has its own verdict naming its own lever.
 
 Each run also reports its **fit-score distribution** rather than a bare `dropped: 34`,
 since that number has two causes needing opposite fixes: scores clustered just below the

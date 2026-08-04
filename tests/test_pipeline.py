@@ -361,6 +361,103 @@ def test_run_pipeline_reports_every_enabled_source_even_a_silent_one(temp_db):
     assert stats["by_source"]["upwork_rss"]["fetched"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# the run cap must not be mistaken for a dead source
+# --------------------------------------------------------------------------- #
+def test_a_source_starved_by_the_run_cap_is_not_called_dead():
+    """`dead` means the source returned nothing. This one returned 30.
+
+    Shipped broken: `fetched` was counted AFTER the run cap, so with a per-source limit
+    equal to the cap the first source in registry order filled it and every later source
+    read `fetched: 0`. A live run reported six of seven sources dead. A wrong verdict is
+    worse than a missing one — it sends you to fix a source that has nothing wrong.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"jobicy": {"fetched": 30, "considered": 0, "new": 0, "contactable": 0,
+                    "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "dead" not in out["jobicy"]["verdict"]
+    assert "starved" in out["jobicy"]["verdict"]
+    # Name the lever, not just the symptom.
+    assert "max_leads_per_run" in out["jobicy"]["verdict"]
+
+
+def test_a_source_that_truly_fetched_nothing_is_still_dead():
+    """The starved check must not swallow the real failure it sits next to."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"uk_contract": {"fetched": 0, "considered": 0, "new": 0, "contactable": 0,
+                         "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "dead" in out["uk_contract"]["verdict"]
+
+
+def test_the_run_cap_samples_every_source_instead_of_exhausting_the_first():
+    """The cap took a prefix of a registry-ordered concatenation.
+
+    So source #1 consumed the entire budget and the rest were never looked at — the
+    cause of the bogus `dead` verdicts. Interleaving makes the cap a sample.
+    """
+    from pipeline import _interleave_by_source
+
+    first = [_lead(i) for i in range(10)]
+    second = [_lead(100 + i) for i in range(10)]
+    for lead in second:
+        lead.source = "jobicy"
+
+    ordered = _interleave_by_source(first + second)
+    sources = {lead.source for lead in ordered[:4]}
+    assert sources == {"upwork_rss", "jobicy"}, "cap must see both sources"
+    assert len(ordered) == 20, "interleaving must not drop or duplicate leads"
+
+
+def test_interleaving_preserves_each_sources_own_ordering():
+    """Sources return newest-first; reordering within a source would bury fresh leads."""
+    from pipeline import _interleave_by_source
+
+    leads = [_lead(1), _lead(2), _lead(3)]
+    ordered = _interleave_by_source(leads)
+    assert [lead.external_id for lead in ordered] == ["job-1", "job-2", "job-3"]
+
+
+def test_run_pipeline_counts_fetched_before_the_cap_truncates(temp_db, monkeypatch):
+    """End-to-end: with the cap smaller than one source's yield, no source reads dead."""
+    import config
+    from pipeline import run_pipeline
+
+    real_get = config.get_settings
+
+    def capped():
+        s = real_get()
+        s.max_leads_per_run = 2
+        return s
+
+    monkeypatch.setattr("pipeline.get_settings", capped)
+
+    other = _lead(99)
+    other.source = "jobicy"
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(1), _lead(2), _lead(3)]), FakeSource([other])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    by_source = stats["by_source"]
+    # per_source_limit == the run cap, so the first source alone returns the whole
+    # budget (2) — precisely the condition that produced the bogus verdicts.
+    assert by_source["upwork_rss"]["fetched"] == 2
+    assert by_source["jobicy"]["fetched"] == 1, "fetched is what the source returned"
+    # The second source is behind the first in registry order and the cap is already
+    # full, so prefix-truncation showed it fetching nothing at all.
+    assert "dead" not in by_source["jobicy"]["verdict"]
+    assert by_source["jobicy"]["considered"] >= 1, "the cap must sample it"
+
+
 def test_fit_summary_percentiles_and_bounds():
     from pipeline import _fit_summary
 

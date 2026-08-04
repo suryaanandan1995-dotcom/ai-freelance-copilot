@@ -54,7 +54,14 @@ def _source_lines(stats: dict) -> list[str]:
     rows = stats.get("by_source") or {}
     if not rows:
         return []
-    order = {"dead": 0, "stale": 1, "unreachable": 2, "unscored": 3, "off-ICP": 4}
+    order = {
+        "dead": 0,
+        "starved": 1,
+        "stale": 2,
+        "unreachable": 3,
+        "unscored": 4,
+        "off-ICP": 5,
+    }
 
     def rank(item) -> tuple[int, str]:
         verdict = item[1].get("verdict", "")
@@ -62,6 +69,7 @@ def _source_lines(stats: dict) -> list[str]:
 
     return [
         f"  {name:<16} fetched={row.get('fetched', 0):<4} "
+        f"considered={row.get('considered', row.get('fetched', 0)):<4} "
         f"new={row.get('new', 0):<4} contactable={row.get('contactable', 0):<4} "
         f"queued={row.get('queued', 0):<3} {row.get('verdict', '')}"
         for name, row in sorted(rows.items(), key=rank)
