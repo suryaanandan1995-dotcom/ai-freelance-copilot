@@ -22,10 +22,11 @@ salary bounds. It needs a (free) app id + key.
 
 Configuration
 -------------
-Register at https://developer.adzuna.com and set::
+Register at https://developer.adzuna.com and set either in ``.env`` or the
+environment (both work — they are read through ``Settings``)::
 
-    export COPILOT_ADZUNA_APP_ID=...
-    export COPILOT_ADZUNA_APP_KEY=...
+    COPILOT_ADZUNA_APP_ID=...
+    COPILOT_ADZUNA_APP_KEY=...
 
 **Unconfigured behaviour is deliberate:** :meth:`fetch` logs a clear one-line
 warning naming the missing variables and returns []. It does NOT fail silently —
@@ -37,11 +38,11 @@ Read-only: fetches public listings only, never applies or submits.
 from __future__ import annotations
 
 import logging
-import os
 import re
 
 import httpx
 
+from config import get_settings
 from core.schemas import Lead
 from sources._keywords import extract_tags, matches_keywords
 from sources.base import LeadSource
@@ -79,9 +80,18 @@ def _strip_html(text: str) -> str:
 
 
 def _credentials() -> tuple[str, str]:
+    """Read the Adzuna app id + key.
+
+    Via ``Settings``, not ``os.environ``: pydantic-settings loads ``.env`` into the
+    settings object and never into the process environment, so reading os.environ
+    directly here meant keys set in ``.env`` were silently ignored and the source
+    reported itself DISABLED — "you never configured it" rather than "your config is
+    being ignored". ``os.environ`` still works, because pydantic reads it too.
+    """
+    settings = get_settings()
     return (
-        os.environ.get("COPILOT_ADZUNA_APP_ID", "").strip(),
-        os.environ.get("COPILOT_ADZUNA_APP_KEY", "").strip(),
+        (settings.adzuna_app_id or "").strip(),
+        (settings.adzuna_app_key or "").strip(),
     )
 
 

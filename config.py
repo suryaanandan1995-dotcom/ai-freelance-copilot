@@ -37,6 +37,24 @@ class Settings(BaseSettings):
     whatsapp_phone_id: str = ""   # WhatsApp Business phone-number ID
     whatsapp_to: str = ""         # recipient in international format, e.g. 9190XXXXXXXX
 
+    # --- lead sources ---
+    # Adzuna (free tier, https://developer.adzuna.com) backs the uk_contract source,
+    # the primary UK day-rate contract feed. Declared here rather than read straight
+    # from os.environ: pydantic-settings loads .env into THIS object and never into
+    # os.environ, so a source reading os.environ.get("COPILOT_ADZUNA_APP_ID") sees
+    # nothing when the key is set in .env — and then reports itself "DISABLED", which
+    # reads as "you never configured it" rather than "your config is being ignored".
+    adzuna_app_id: str = ""
+    adzuna_app_key: str = ""
+
+    # Comma-separated RSS feed overrides for two sources, same reason as above: these
+    # were read from os.environ, so a value set in .env did nothing. It matters most for
+    # upwork_feeds, which has NO built-in default — an ignored override leaves that
+    # source with zero feeds, i.e. silently switched off. Blank means "use the module
+    # defaults" for startup_feeds, and "no feeds" for upwork_feeds.
+    startup_feeds: str = ""
+    upwork_feeds: str = ""
+
     # --- RAG ---
     portfolio_repos_path: str = ".."  # where the user's repos live (for KB ingest)
     rag_store_path: str = "data/portfolio_kb.json"
