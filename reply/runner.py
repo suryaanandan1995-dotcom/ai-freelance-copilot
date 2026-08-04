@@ -97,6 +97,7 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
     stats = {
         "inbound": 0,
         "replied": 0,
+        "detected_only": 0,  # recorded + marked replied, but not auto-answered
         "suppressed": 0,
         "skipped": 0,
         "capped": 0,
@@ -104,9 +105,16 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
     }
 
     settings = get_settings()
-    if not settings.auto_reply:
-        logger.info("run_reply_pass: auto_reply disabled — no-op")
+    # Two independent halves, deliberately gated separately:
+    #   detection (read the inbox, record the inbound, mark the lead replied) — safe,
+    #     sends nothing, and is what stops the follow-up sequence;
+    #   response (draft + send a reply) — needs ``auto_reply``.
+    # Sharing one gate meant that with auto_reply off nothing was ever marked replied,
+    # so follow-ups kept nudging people who had already answered.
+    if not settings.auto_reply and not settings.reply_detection:
+        logger.info("run_reply_pass: reply detection and auto_reply both off — no-op")
         return stats
+    responding = bool(settings.auto_reply)
 
     # Every other DB-touching entrypoint (pipeline, followup, optimizer, dashboard)
     # bootstraps the schema first; this one did not. ``record_run`` calls init_db only
@@ -120,7 +128,7 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
     # Imported here so tests can monkeypatch reply.inbox.fetch_replies cleanly and
     # so the module imports without live IMAP.
     from reply.inbox import fetch_replies
-    from reply.respond import classify_and_draft
+    from reply.respond import _looks_like_optout, classify_and_draft
     from reply.sender import send_reply
 
     try:
@@ -147,6 +155,19 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
 
             if is_suppressed(email):
                 stats["skipped"] += 1
+                continue
+
+            if not responding:
+                # Detection-only mode. The reply is recorded and the lead is marked
+                # replied (so follow-ups stop and the optimizer sees a real reply rate),
+                # but we neither draft nor send. An opt-out is still honoured here: the
+                # check is deterministic and costs no model call, and someone who asked
+                # to be removed must be suppressed whether or not we auto-answer.
+                if _looks_like_optout(body):
+                    _suppress(email)
+                    stats["suppressed"] += 1
+                else:
+                    stats["detected_only"] += 1
                 continue
 
             if _outbound_count(email) >= settings.max_replies_per_thread:

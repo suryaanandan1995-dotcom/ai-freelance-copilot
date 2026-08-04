@@ -109,7 +109,7 @@ def _patch_send_true(monkeypatch):
 # --------------------------------------------------------------------------- #
 # 1. master gate off -> no-op
 # --------------------------------------------------------------------------- #
-def test_run_reply_pass_noop_when_auto_reply_off(temp_db, monkeypatch):
+def test_run_reply_pass_noop_when_both_gates_off(temp_db, monkeypatch):
     import config
     import reply.runner as runner
 
@@ -118,10 +118,11 @@ def test_run_reply_pass_noop_when_auto_reply_off(temp_db, monkeypatch):
     def off():
         cfg = real()
         cfg.auto_reply = False
+        cfg.reply_detection = False
         return cfg
 
     monkeypatch.setattr(runner, "get_settings", off)
-    # fetch_replies must never be called when gated off.
+    # fetch_replies must never be called when gated fully off.
     monkeypatch.setattr(
         "reply.inbox.fetch_replies",
         lambda limit=20: (_ for _ in ()).throw(AssertionError("should not fetch")),
@@ -131,11 +132,134 @@ def test_run_reply_pass_noop_when_auto_reply_off(temp_db, monkeypatch):
     assert stats == {
         "inbound": 0,
         "replied": 0,
+        "detected_only": 0,
         "suppressed": 0,
         "skipped": 0,
         "capped": 0,
         "flagged": 0,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 1b. detection is NOT gated on the send flag
+# --------------------------------------------------------------------------- #
+def _detection_only(monkeypatch):
+    """auto_reply OFF, reply_detection ON — the default shipped configuration."""
+    import config
+
+    real = config.get_settings
+
+    def s():
+        cfg = real()
+        cfg.auto_reply = False
+        cfg.reply_detection = True
+        cfg.smtp_host = "smtp.example.com"
+        cfg.smtp_user = "me@example.com"
+        cfg.smtp_password = "app-pw"
+        return cfg
+
+    for mod in ("reply.runner", "reply.respond", "reply.sender", "reply.inbox"):
+        monkeypatch.setattr(f"{mod}.get_settings", s, raising=False)
+    return s
+
+
+def test_a_reply_is_marked_replied_even_with_auto_reply_off(temp_db, monkeypatch):
+    """The defect this split exists to prevent.
+
+    Marking a lead replied is what stops the follow-up sequence and what the optimizer
+    measures as reply_rate. It used to share one gate with *sending* auto-replies, so
+    under the default config (auto_reply off) the inbox was never read at all: prospects
+    who answered kept receiving nudges, and reply_rate read 0.0 forever — which is
+    indistinguishable from a pitch nobody wants, and points the optimizer at the wrong
+    stage of the funnel.
+    """
+    import reply.runner as runner
+    from db.models import OutreachRecord
+    from db.session import get_session
+
+    _detection_only(monkeypatch)
+    _patch_fetch(monkeypatch, [_inbound("Interested — can you send more detail?")])
+    monkeypatch.setattr(
+        "reply.sender.send_reply",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not send")),
+    )
+
+    # temp_db already seeds PROSPECT as contacted, with replied defaulting to False.
+    with get_session() as session:
+        assert session.query(OutreachRecord).filter_by(email=PROSPECT).one().replied is False
+
+    stats = runner.run_reply_pass(chat=FakeChat(responses=["unused"]))
+
+    assert stats["inbound"] == 1
+    assert stats["detected_only"] == 1
+    assert stats["replied"] == 0  # nothing was auto-answered
+    with get_session() as session:
+        rec = session.query(OutreachRecord).filter_by(email=PROSPECT).one()
+        assert rec.replied is True
+
+
+def test_detection_only_still_honours_an_opt_out(temp_db, temp_suppress, monkeypatch):
+    """Someone who asks to be removed must be suppressed whether or not we auto-answer.
+
+    The opt-out check is deterministic and costs no model call, so there is no reason to
+    skip it in detection-only mode — and continuing to email a person who said "stop" is
+    the one failure here with legal weight rather than merely commercial weight.
+    """
+    import reply.runner as runner
+
+    _detection_only(monkeypatch)
+    _patch_fetch(monkeypatch, [_inbound("Please unsubscribe me.")])
+    monkeypatch.setattr(
+        "reply.sender.send_reply",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not send")),
+    )
+
+    stats = runner.run_reply_pass(chat=FakeChat(responses=["unused"]))
+
+    assert stats["suppressed"] == 1
+    assert stats["detected_only"] == 0
+    assert PROSPECT in temp_suppress.read_text(encoding="utf-8").lower()
+
+
+def test_fetch_replies_does_not_require_auto_reply(monkeypatch):
+    """``fetch_replies`` reads and marks \\Seen; it never sends. Only credentials gate it."""
+    import config
+    import reply.inbox as inbox
+
+    real = config.get_settings
+
+    def s():
+        cfg = real()
+        cfg.auto_reply = False
+        cfg.reply_detection = True
+        cfg.smtp_host = ""  # no credentials -> still a no-op, but for the right reason
+        cfg.smtp_user = ""
+        return cfg
+
+    monkeypatch.setattr(inbox, "get_settings", s)
+    assert inbox.fetch_replies() == []
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        inbox, "_known_senders", lambda: calls.append("loaded") or {PROSPECT}
+    )
+
+    def s2():
+        cfg = s()
+        cfg.smtp_host = "smtp.example.com"
+        cfg.smtp_user = "me@example.com"
+        return cfg
+
+    monkeypatch.setattr(inbox, "get_settings", s2)
+
+    def boom(*a, **k):
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(inbox.imaplib, "IMAP4_SSL", boom)
+    # Got past the gate (loaded known senders) and degraded to [] on the network error
+    # rather than raising — the unattended schedule depends on that.
+    assert inbox.fetch_replies() == []
+    assert calls == ["loaded"]
 
 
 # --------------------------------------------------------------------------- #
