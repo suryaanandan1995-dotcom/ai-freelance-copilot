@@ -277,10 +277,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_reply = sub.add_parser(
         "reply",
         help=(
-            "Read prospect replies (IMAP) and respond autonomously in the owner's "
-            "voice. Fully auto-negotiates but never commits pricing/scope/timeline/"
-            "contracts (defers to a cal.com call), BCCs the owner, capped per thread. "
-            "Gated by COPILOT_AUTO_REPLY + SMTP config; no-op otherwise."
+            "Read prospect replies over IMAP. Two independently gated halves: "
+            "DETECTION (on by default via COPILOT_REPLY_DETECTION) records each "
+            "inbound, marks the lead replied so follow-ups stop, and honours "
+            "opt-outs — it sends nothing; RESPONSE (COPILOT_AUTO_REPLY) also answers "
+            "autonomously in the owner's voice, never committing pricing/scope/"
+            "timeline/contracts (defers to a cal.com call), BCCs the owner, capped "
+            "per thread. Needs SMTP/IMAP credentials either way."
         ),
     )
     p_reply.set_defaults(func=_cmd_reply)
