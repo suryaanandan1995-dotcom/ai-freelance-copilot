@@ -258,6 +258,109 @@ def test_fit_summary_reports_no_bottleneck_when_leads_pass():
     assert "none" in s["bottleneck"]
 
 
+# --------------------------------------------------------------------------- #
+# per-source attribution: making "the lead mix is off-ICP" actionable
+# --------------------------------------------------------------------------- #
+def test_per_source_summary_separates_the_good_source_from_the_useless_ones():
+    """`_fit_summary` says the mix is off-ICP; this says WHICH sources caused it.
+
+    "All sources are mediocre" and "six are useless and one is good" produce the same
+    totals and need opposite responses — expand the winner vs. re-target everything.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "hn_hiring": {
+                "fetched": 10, "new": 10, "contactable": 6, "queued": 2,
+                "scores": [40, 72, 88],
+            },
+            "jobicy": {
+                "fetched": 20, "new": 20, "contactable": 18, "queued": 0,
+                "scores": [8, 12, 15],
+            },
+        },
+        threshold=70,
+    )
+
+    assert out["hn_hiring"]["passed"] == 2
+    assert "productive" in out["hn_hiring"]["verdict"]
+    assert out["jobicy"]["passed"] == 0
+    assert "off-ICP" in out["jobicy"]["verdict"]
+    # The verdict must name the evidence, so it can be acted on without re-deriving it.
+    assert "15" in out["jobicy"]["verdict"] and "70" in out["jobicy"]["verdict"]
+
+
+def test_a_source_that_fetched_nothing_is_reported_as_dead():
+    """A dead source must be visible, not absent.
+
+    An omitted row reads as "not a problem" — which is the failure mode this whole
+    report exists to expose. run_pipeline seeds a row for every enabled source so a
+    source yielding zero is still named.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"upwork_rss": {"fetched": 0, "new": 0, "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "dead" in out["upwork_rss"]["verdict"]
+
+
+def test_a_source_whose_leads_are_never_reachable_is_called_out_separately():
+    """Yields leads but no contactable one = paying to score the unemailable.
+
+    Distinct from "off-ICP" and from "dead": the leads are real and new, they score,
+    and none of them can ever be emailed. That burns scoring spend every single run
+    and is invisible in the run totals.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"remote_boards": {"fetched": 25, "new": 25, "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "unreachable" in out["remote_boards"]["verdict"]
+    assert "wasted spend" in out["remote_boards"]["verdict"]
+
+
+def test_a_source_returning_only_already_seen_leads_is_stale_not_dead():
+    """Fetching 25 leads we've all seen before is a different problem from fetching 0."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"hn_freelancer": {"fetched": 25, "new": 0, "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "stale" in out["hn_freelancer"]["verdict"]
+
+
+def test_run_pipeline_reports_every_enabled_source_even_a_silent_one(temp_db):
+    """End-to-end: a source that returns [] still gets a row in the run stats.
+
+    Attribution built only from returned leads would omit it, and an absent row reads
+    as "no problem here" — so run_pipeline seeds a row per enabled source.
+    """
+    from pipeline import run_pipeline
+
+    class SilentSource:
+        name = "silent_board"
+
+        def fetch(self, limit: int = 50):
+            return []
+
+    stats = run_pipeline(
+        sources=[SilentSource(), FakeSource([_lead(1)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    assert "silent_board" in stats["by_source"]
+    assert "dead" in stats["by_source"]["silent_board"]["verdict"]
+    # The productive source is attributed too, so the contrast is visible in one place.
+    assert stats["by_source"]["upwork_rss"]["fetched"] == 1
+
+
 def test_fit_summary_percentiles_and_bounds():
     from pipeline import _fit_summary
 

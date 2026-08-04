@@ -41,6 +41,33 @@ def _kpi_block() -> str:
         return ""
 
 
+def _source_lines(stats: dict) -> list[str]:
+    """Per-source verdicts, worst first, or [] if the run reported none.
+
+    The digest is the only part of this system anyone reads. ``fit.bottleneck`` can say
+    "the lead mix is off-ICP" but not which sources caused it, so the actionable fix —
+    retire the dead ones, widen the productive one — stayed invisible while every run
+    looked uniformly mediocre. Dead/stale/unreachable sources are listed BEFORE the
+    productive ones: a source silently yielding nothing is the finding, and burying it
+    under working sources is how it went unnoticed for a month.
+    """
+    rows = stats.get("by_source") or {}
+    if not rows:
+        return []
+    order = {"dead": 0, "stale": 1, "unreachable": 2, "unscored": 3, "off-ICP": 4}
+
+    def rank(item) -> tuple[int, str]:
+        verdict = item[1].get("verdict", "")
+        return (order.get(verdict.split(":")[0], 9), item[0])
+
+    return [
+        f"  {name:<16} fetched={row.get('fetched', 0):<4} "
+        f"new={row.get('new', 0):<4} contactable={row.get('contactable', 0):<4} "
+        f"queued={row.get('queued', 0):<3} {row.get('verdict', '')}"
+        for name, row in sorted(rows.items(), key=rank)
+    ]
+
+
 def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
     lines = ["AI Freelance Copilot — pipeline digest", ""]
 
@@ -70,6 +97,10 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
             f"max={fit.get('max')} (bar {fit.get('threshold')})"
         )
         lines.append(f"  Bottleneck  : {fit['bottleneck']}")
+    source_lines = _source_lines(stats)
+    if source_lines:
+        lines += ["", "BY SOURCE (worst first — retire what never produces)"]
+        lines += source_lines
     if stats.get("budget_exhausted"):
         lines.append("NOTE: per-run budget cap reached; run stopped early.")
     lines += ["", "Top leads awaiting your review:"]
@@ -111,6 +142,13 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
         if fit.get("bottleneck")
         else ""
     )
+    source_lines = _source_lines(stats)
+    source_html = (
+        "<h3>By source</h3><pre style=\"background:#f6f8fa;padding:10px;"
+        'border-radius:6px">' + "\n".join(source_lines) + "</pre>"
+        if source_lines
+        else ""
+    )
     return f"""\
 <html><body style="font-family:system-ui,Arial,sans-serif">
 <h2>AI Freelance Copilot — pipeline digest</h2>
@@ -127,6 +165,7 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
   <li>Cost: ${stats.get('cost_usd', 0.0):.4f}</li>
 </ul>
 {fit_html}
+{source_html}
 {note}
 <h3>Top leads awaiting your review</h3>
 <ol>{rows}</ol>
@@ -150,10 +189,18 @@ def _send_email(stats: dict, top_leads: list[dict]) -> bool:
     queued = stats.get("queued", 0)
     emailed = stats.get("emailed", 0)
     contactable = stats.get("contactable", 0)
+    # A dead source is named in the subject, because the body is skimmed and this is
+    # the one failure that makes every downstream number meaningless.
+    rows = stats.get("by_source") or {}
+    dead = sorted(n for n, r in rows.items() if (r.get("verdict") or "").startswith("dead"))
     if queued or emailed:
         subject = f"[Copilot] {queued} draft(s), {emailed} email(s) sent"
+        if dead:
+            subject += f" — {len(dead)} dead source(s)"
     elif contactable:
         subject = f"[Copilot] NOTHING QUEUED — {contactable} contactable, 0 drafted"
+    elif dead and len(dead) == len(rows):
+        subject = f"[Copilot] EVERY SOURCE DEAD — {', '.join(dead[:3])}"
     else:
         subject = "[Copilot] NO CONTACTABLE LEADS — sourcing needs attention"
     msg["Subject"] = subject
