@@ -8,7 +8,9 @@ contacted (an address matching an ``OutreachRecord`` or an existing
 doesn't re-read them.
 
 Hard safety properties:
-  * NO-OP (returns ``[]``) unless ``settings.auto_reply`` is True AND both
+  * Reads only; sends nothing. Gated on ``settings.reply_detection`` (on by
+    default) rather than on ``auto_reply``, because knowing a prospect answered
+    must not depend on whether we auto-answer them. Still a NO-OP unless both
     ``smtp_host`` and ``smtp_user`` are configured.
   * Never raises — any IMAP / parse failure degrades to ``[]`` so the runner
     loop is safe on the unattended cloud schedule.
@@ -83,8 +85,11 @@ def fetch_replies(limit: int = 20) -> list[dict]:
     dicts, and marks the returned messages ``\\Seen``.
     """
     settings = get_settings()
-    if not settings.auto_reply:
-        logger.info("fetch_replies: auto_reply disabled — no-op")
+    # Deliberately NOT gated on ``auto_reply``. Reading the inbox sends nothing; it is
+    # what lets the system know a prospect answered. Answering is gated separately in
+    # ``reply.sender.send_reply``. See the ``reply_detection`` note in config.py.
+    if not settings.reply_detection and not settings.auto_reply:
+        logger.info("fetch_replies: reply detection disabled — no-op")
         return []
     if not settings.smtp_host or not settings.smtp_user:
         logger.info("fetch_replies: SMTP host/user not configured — no-op")

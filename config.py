@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     # never makes contractual/legal commitments; always BCCs the owner; capped per
     # thread so it can't loop. Gated off by default.
     auto_reply: bool = False
+    # Reading the inbox is a SEPARATE concern from answering it, and must not share a
+    # gate with it. Detecting a reply is what sets ``OutreachRecord.replied``, which is
+    # what stops the follow-up sequence and what the optimizer measures. Gating the read
+    # on the send flag means that with auto_reply off (the default) nobody is ever marked
+    # replied: prospects who answered keep getting nudged, and reply_rate reads 0.0
+    # forever — indistinguishable from a pitch nobody wants. Detection is safe to leave
+    # on because it sends nothing; it only needs IMAP credentials.
+    reply_detection: bool = True
     imap_host: str = "imap.gmail.com"
     imap_port: int = 993
     max_replies_per_thread: int = 6   # safety stop against reply loops

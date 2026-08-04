@@ -229,6 +229,125 @@ def test_daily_cap_respected(temp_db, temp_suppress, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# 6b. the daily cap is shared with cold outreach, not per-channel
+# --------------------------------------------------------------------------- #
+def test_cold_emails_sent_today_consume_the_followup_budget(temp_db, temp_suppress, monkeypatch):
+    """The cap protects one mailbox, so it has to be counted across every channel.
+
+    It used to be enforced twice against two disjoint counters: the pipeline counted
+    cold emails (``sent_at`` today) and this runner counted follow-ups
+    (``followups_sent > 0``). Neither could see the other's sends, so a configured cap
+    of 20 permitted 40 messages a day — and nothing reported an overage, because each
+    channel was correctly under its own limit. Deliverability damage is the symptom, and
+    it shows up as a falling reply rate weeks later.
+    """
+    import config
+    import followup.runner as runner
+
+    real = config.get_settings
+
+    def s():
+        cfg = real()
+        cfg.auto_email = True
+        cfg.smtp_host = "smtp.example.com"
+        cfg.max_followups = 2
+        cfg.followup_after_days = 3
+        cfg.max_emails_per_day = 3
+        return cfg
+
+    monkeypatch.setattr(runner, "get_settings", s)
+
+    # Two cold emails already went out today, from the pipeline.
+    now = _dt.datetime.now(_dt.UTC)
+    with dbsession.get_session() as session:
+        for i in range(2):
+            session.add(
+                OutreachRecord(
+                    email=f"cold{i}@acme.com",
+                    subject="cold",
+                    status="sent",
+                    sent_at=now,
+                    last_contact_at=now,
+                )
+            )
+
+    # Three follow-ups are due. Only one may go out: 3 - 2 already sent = 1.
+    for i in range(3):
+        _seed(f"due{i}@acme.com", days_ago=5)
+    calls = _patch_send_true(monkeypatch)
+
+    stats = runner.run_followups(chat=FakeChat(responses=["nudge"]))
+
+    assert stats["candidates"] == 3
+    assert stats["sent"] == 1
+    assert stats["capped"] == 2
+    assert len(calls) == 1
+
+
+def test_followups_sent_today_consume_the_cold_email_budget(temp_db, monkeypatch):
+    """The same accounting, viewed from the pipeline's side of the shared cap."""
+    from outreach.quota import emails_sent_today, remaining_today
+
+    now = _dt.datetime.now(_dt.UTC)
+    with dbsession.get_session() as session:
+        session.add(
+            OutreachRecord(
+                email="cold@acme.com", subject="c", status="sent",
+                sent_at=now, last_contact_at=now,
+            )
+        )
+        session.add(
+            OutreachRecord(
+                email="nudged@acme.com", subject="n", status="sent",
+                sent_at=now - _dt.timedelta(days=5),  # cold email was days ago
+                followups_sent=1, last_contact_at=now,  # but the nudge went today
+            )
+        )
+
+    with dbsession.get_session() as session:
+        assert emails_sent_today(session) == 2
+        assert remaining_today(session, 5) == 3
+        # Never negative: an over-cap day must not hand out a negative allowance that
+        # reads as "room to send" after arithmetic elsewhere.
+        assert remaining_today(session, 1) == 0
+
+
+def test_yesterdays_sends_do_not_consume_todays_budget(temp_db, monkeypatch):
+    """The cap is a daily budget; it has to actually reset at UTC midnight."""
+    from outreach.quota import emails_sent_today
+
+    yesterday = _dt.datetime.now(_dt.UTC) - _dt.timedelta(days=1)
+    with dbsession.get_session() as session:
+        session.add(
+            OutreachRecord(
+                email="old@acme.com", subject="o", status="sent",
+                sent_at=yesterday, followups_sent=1, last_contact_at=yesterday,
+            )
+        )
+
+    with dbsession.get_session() as session:
+        assert emails_sent_today(session) == 0
+
+
+def test_a_failed_send_does_not_consume_the_budget(temp_db, monkeypatch):
+    """Only messages that actually left count. A record whose send failed carries a
+    non-``sent`` status, and charging it against the cap would silently shrink the
+    day's real allowance every time SMTP hiccuped."""
+    from outreach.quota import emails_sent_today
+
+    now = _dt.datetime.now(_dt.UTC)
+    with dbsession.get_session() as session:
+        session.add(
+            OutreachRecord(
+                email="failed@acme.com", subject="f", status="failed", sent_at=now
+            )
+        )
+
+    with dbsession.get_session() as session:
+        assert emails_sent_today(session) == 0
+
+
+# --------------------------------------------------------------------------- #
 # 7. a suppressed email is skipped
 # --------------------------------------------------------------------------- #
 def test_suppressed_email_skipped(temp_db, temp_suppress, auto_email_on, monkeypatch):

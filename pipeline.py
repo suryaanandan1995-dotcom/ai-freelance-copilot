@@ -38,17 +38,15 @@ def _proposals_today(session: Any) -> int:
 
 
 def _emails_today(session: Any) -> int:
-    """Count outreach emails actually sent since UTC midnight (daily cap)."""
-    from db.models import OutreachRecord
+    """Count every outbound email sent since UTC midnight (shared daily cap).
 
-    return (
-        session.query(OutreachRecord)
-        .filter(
-            OutreachRecord.sent_at >= _today_start(),
-            OutreachRecord.status == "sent",
-        )
-        .count()
-    )
+    Delegates to ``outreach.quota`` so cold emails and follow-ups are counted against
+    one budget. Counting only this channel's sends made the cap per-channel, which is
+    not what protects a sending domain.
+    """
+    from outreach.quota import emails_sent_today
+
+    return emails_sent_today(session)
 
 
 def _maybe_email_lead(

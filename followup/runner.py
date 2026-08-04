@@ -13,7 +13,8 @@ Selection criteria for a candidate OutreachRecord:
   * the email is not on the suppression list
 
 Each candidate is wrapped so one failure (bad lead, send error) can't stop the
-loop, and the daily cap counts follow-ups already sent today.
+loop. The daily cap is shared with cold outreach (see ``outreach.quota``): a
+mailbox's reputation doesn't care which code path sent the message.
 """
 from __future__ import annotations
 
@@ -23,11 +24,6 @@ import logging
 from config import get_settings
 
 logger = logging.getLogger(__name__)
-
-
-def _today_start() -> _dt.datetime:
-    now = _dt.datetime.now(_dt.UTC)
-    return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def _lead_from_record(lead_rec, outreach):
@@ -78,21 +74,14 @@ def run_followups(chat=None) -> dict:
     now = _dt.datetime.now(_dt.UTC)
     cutoff = now - _dt.timedelta(days=settings.followup_after_days)
 
-    # How many follow-ups have already gone out today (respect the daily cap).
-    # A follow-up bumps ``last_contact_at`` to ``now`` and increments
-    # ``followups_sent``, so records touched today with >=1 follow-up are today's.
-    with get_session() as session:
-        sent_today = (
-            session.query(OutreachRecord)
-            .filter(
-                OutreachRecord.last_contact_at >= _today_start(),
-                OutreachRecord.followups_sent > 0,
-            )
-            .count()
-        )
+    # How many emails may still go out today. Counted across ALL channels, not just
+    # follow-ups: this used to count only follow-ups while the pipeline separately
+    # counted only cold emails, so neither could see the other and a cap of 20 allowed
+    # 40 sends from one mailbox. See outreach/quota.py.
+    from outreach.quota import remaining_today
 
-    daily_cap = settings.max_emails_per_day
-    remaining = max(0, daily_cap - sent_today)
+    with get_session() as session:
+        remaining = remaining_today(session, settings.max_emails_per_day)
 
     with get_session() as session:
         candidates = (
