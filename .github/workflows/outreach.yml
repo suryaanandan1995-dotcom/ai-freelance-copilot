@@ -59,6 +59,19 @@ jobs:
       - name: Run outreach pipeline
         run: python main.py run --auto-email --notify
 
+      - name: Read the inbox before nudging anyone
+        # MUST run before the follow-up step. Detection is what sets
+        # OutreachRecord.replied, and a follow-up is only suppressed for records
+        # already marked replied. Nudging in the other order emails people who
+        # answered overnight — the single worst-looking failure this system can
+        # produce, and one the prospect notices before we do.
+        #
+        # This sends nothing: COPILOT_AUTO_REPLY is not set here, so the pass runs
+        # in detection-only mode (records the inbound, marks the lead replied,
+        # honours opt-outs). The separate Auto-Reply workflow does the answering.
+        continue-on-error: true
+        run: python main.py reply
+
       - name: Send follow-ups
         # Spaced nudges to prior cold-emailed leads who never replied. Shares the
         # same master gate (COPILOT_AUTO_EMAIL), daily cap, SMTP transport, and
