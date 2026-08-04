@@ -279,6 +279,28 @@ def test_subject_shouts_when_every_source_is_dead(monkeypatch):
     assert "uk_contract" in subject
 
 
+def test_starved_sources_rank_just_below_dead_ones(monkeypatch):
+    """`starved` is a cap problem, `dead` is a source problem — both outrank off-ICP.
+
+    A starved source looks fine in the fetched column, so if it sorted last nobody would
+    notice the run cap was hiding six sources.
+    """
+    _email_settings(monkeypatch)
+    rows = dict(_by_source())
+    rows["working_nomads"] = {
+        "fetched": 30, "considered": 0, "new": 0, "contactable": 0, "queued": 0,
+        "verdict": "starved: fetched 30, none considered — raise max_leads_per_run",
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    assert body.index("uk_contract") < body.index("working_nomads")
+    assert body.index("working_nomads") < body.index("jobicy")
+    # fetched=30 next to "none considered" is what makes the verdict believable.
+    assert "considered=0" in body
+
+
 def test_digest_without_source_data_omits_the_section(monkeypatch):
     """Older runs (and the reply/followup digests) carry no by_source key."""
     _email_settings(monkeypatch)

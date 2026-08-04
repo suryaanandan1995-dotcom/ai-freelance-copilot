@@ -163,6 +163,32 @@ def _fit_summary(scores: list[int], threshold: int) -> dict:
     }
 
 
+def _interleave_by_source(leads: list) -> list:
+    """Round-robin leads across their sources, preserving each source's own order.
+
+    ``fetch_all`` concatenates sources in registry order, so truncating to the run cap
+    took a prefix — i.e. everything from the first source and nothing from the rest. With
+    a per-source limit equal to the run cap (both default 50), the first source alone
+    filled it: six of seven sources were reported ``dead: fetched nothing`` on a live run
+    when the truth was that the cap consumed the budget before they were reached.
+
+    That is worse than the missing report it replaced: a wrong verdict gets acted on.
+    Interleaving makes the cap sample every source instead of exhausting the first.
+    """
+    by_source: dict[str, list] = {}
+    for lead in leads:
+        by_source.setdefault(lead.source, []).append(lead)
+    out: list = []
+    queues = list(by_source.values())
+    index = 0
+    while len(out) < len(leads):
+        for queue in queues:
+            if index < len(queue):
+                out.append(queue[index])
+        index += 1
+    return out
+
+
 def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
     """Attribute the funnel to each source, so targeting can be fixed with evidence.
 
@@ -179,8 +205,14 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
     out: dict[str, dict] = {}
     for name, row in sorted(rows.items()):
         scores = sorted(row.get("scores") or [])
+        fetched = row.get("fetched", 0)
+        # ``considered`` defaults to ``fetched`` so callers that don't track it (and the
+        # summary's own unit tests) keep behaving as before rather than reading 0 and
+        # reporting every source starved.
+        considered = row.get("considered", fetched)
         entry = {
-            "fetched": row.get("fetched", 0),
+            "fetched": fetched,
+            "considered": considered,
             "new": row.get("new", 0),
             "contactable": row.get("contactable", 0),
             "queued": row.get("queued", 0),
@@ -192,8 +224,14 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             entry["passed"] = sum(1 for s in scores if s >= threshold)
         # Name the per-source verdict rather than leaving it to be inferred from
         # five numbers. Ordered most- to least-severe.
-        if not entry["fetched"]:
+        if not fetched:
             entry["verdict"] = "dead: fetched nothing"
+        elif not considered:
+            # The source worked; the run cap spent its whole budget elsewhere. Blaming
+            # the source here would send you to fix a source that has nothing wrong.
+            entry["verdict"] = (
+                f"starved: fetched {fetched}, none considered — raise max_leads_per_run"
+            )
         elif not entry["new"]:
             entry["verdict"] = "stale: every lead already seen"
         elif not entry["contactable"]:
@@ -261,7 +299,14 @@ def run_pipeline(
     def _src(name: str) -> dict:
         return by_source.setdefault(
             name,
-            {"fetched": 0, "new": 0, "contactable": 0, "queued": 0, "scores": []},
+            {
+                "fetched": 0,
+                "considered": 0,
+                "new": 0,
+                "contactable": 0,
+                "queued": 0,
+                "scores": [],
+            },
         )
 
     def _skip_email(reason: str) -> None:
@@ -283,18 +328,28 @@ def run_pipeline(
 
         leads = fetch_all(srcs, per_source_limit=per_source)
 
+        # ``fetched`` is counted BEFORE the run cap, so it means "what the source
+        # returned" and nothing else. Counting it after made the number a function of
+        # registry order: a source could be labelled ``dead: fetched nothing`` because
+        # the cap was already full when its turn came. A verdict that blames a source
+        # for the caller's cap is worse than no verdict, because it gets acted on.
+        for lead in leads:
+            _src(lead.source)["fetched"] += 1
+
         cap = limit if limit is not None else settings.max_leads_per_run
         if cap is not None and len(leads) > cap:
-            leads = leads[:cap]
+            # Interleave BEFORE truncating. fetch_all concatenates in registry order, so
+            # a prefix is "all of source #1, none of the rest" — which reported six of
+            # seven sources dead on a live run. See _interleave_by_source.
+            leads = _interleave_by_source(leads)[:cap]
 
         fetched = len(leads)
         metrics.inc("leads_fetched_total", fetched)
 
-        # Counted after the run cap (so the per-source figures sum to ``fetched``) but
-        # before the seen-already filter, which keeps "returns only leads we've already
-        # seen" distinguishable from "returns nothing at all".
+        # What actually survived the cap, per source. A source that fetched leads but
+        # had none considered is starved by the cap, not dead — the opposite fix.
         for lead in leads:
-            _src(lead.source)["fetched"] += 1
+            _src(lead.source)["considered"] += 1
 
         for lead in leads:
             # Dedupe against the DB by (source, external_id).
