@@ -197,6 +197,41 @@ Three deliberate choices in there:
   needs attention` cannot be mistaken for a normal run in an inbox; `12 drafts queued`
   was, seventeen times.
 
+### Per-source attribution
+
+`sources: 0/46 cleared 70` correctly identifies *targeting* as the bottleneck, and is
+still not actionable: with seven sources enabled it does not say which ones produced the
+46. "All seven are mediocre" and "six are useless, one is good" give identical totals and
+need opposite fixes — re-target everything, or drop six and widen the seventh.
+
+So every run attributes the funnel per source and states a verdict, worst first:
+
+```text
+BY SOURCE (worst first — retire what never produces)
+  uk_contract      fetched=0    new=0    contactable=0    queued=0   dead: fetched nothing
+  remote_boards    fetched=25   new=25   contactable=0    queued=0   unreachable: leads have no email, so scoring them is wasted spend
+  hn_hiring        fetched=12   new=12   contactable=7    queued=0   off-ICP: best score 68 < 70
+```
+
+The five verdicts are deliberately distinct failures, not severity grades:
+
+| verdict | meaning | fix |
+| --- | --- | --- |
+| `dead` | fetched nothing at all | credentials, or the endpoint is gone |
+| `stale` | fetched only leads already in the DB | widen the query, or retire it |
+| `unreachable` | real new leads, none with an email | stop paying to score it |
+| `unscored` | pre-gated before reaching the model | check the pre-gates |
+| `off-ICP` | scored, none cleared the bar | re-target, or lower the bar |
+
+Two properties matter more than the table itself:
+
+- **A row is seeded for every *enabled* source before fetching**, so a source that yields
+  nothing still appears. Building the table from returned leads would omit it entirely,
+  and an absent row reads as "not a problem" — which is the failure this report exists to
+  expose. `uk_contract` sat `DISABLED` through a month of green runs.
+- **Dead sources sort above working ones, and reach the subject line.** A run that queues
+  three drafts *and* has a broken source used to read as unqualified success.
+
 Each run also reports its **fit-score distribution** rather than a bare `dropped: 34`,
 since that number has two causes needing opposite fixes: scores clustered just below the
 threshold mean the threshold is too strict, scores far below it mean the sources are

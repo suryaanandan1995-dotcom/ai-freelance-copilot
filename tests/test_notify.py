@@ -205,6 +205,89 @@ def test_body_names_the_fit_bottleneck_when_present(monkeypatch):
     assert "within 10 points" in body
 
 
+# --------------------------------------------------------------------------- #
+# per-source attribution in the digest
+# --------------------------------------------------------------------------- #
+def _by_source() -> dict:
+    return {
+        "hn_hiring": {
+            "fetched": 12, "new": 12, "contactable": 7, "queued": 3,
+            "verdict": "productive: 3 cleared 70",
+        },
+        "jobicy": {
+            "fetched": 20, "new": 20, "contactable": 18, "queued": 0,
+            "verdict": "off-ICP: best score 22 < 70",
+        },
+        "uk_contract": {
+            "fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+            "verdict": "dead: fetched nothing",
+        },
+    }
+
+
+def test_body_attributes_the_funnel_to_each_source(monkeypatch):
+    """The digest is the only thing read, so the per-source table has to be in it.
+
+    ``fit.bottleneck`` says the mix is off-ICP but not which sources produced it, so the
+    actual fix — retire the dead ones, widen the productive one — stays invisible.
+    """
+    _email_settings(monkeypatch)
+
+    notify.send_digest(dict(_stats(), by_source=_by_source()), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    assert "BY SOURCE" in body
+    for name in ("hn_hiring", "jobicy", "uk_contract"):
+        assert name in body
+    assert "dead: fetched nothing" in body
+
+
+def test_dead_sources_are_listed_before_the_working_ones(monkeypatch):
+    """Ordering is the feature: a dead source buried under working ones is how
+    uk_contract stayed DISABLED for a month of green runs."""
+    _email_settings(monkeypatch)
+
+    notify.send_digest(dict(_stats(), by_source=_by_source()), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    assert body.index("uk_contract") < body.index("jobicy") < body.index("hn_hiring")
+
+
+def test_subject_names_a_dead_source_even_on_a_successful_run(monkeypatch):
+    """A run can queue drafts and still have a broken source. The old subject read
+    as unqualified success, so the breakage never surfaced."""
+    _email_settings(monkeypatch)
+
+    notify.send_digest(dict(_stats(), queued=3, emailed=1, by_source=_by_source()), _top())
+    assert "dead source(s)" in _FakeSMTP.sent[0]["Subject"]
+
+
+def test_subject_shouts_when_every_source_is_dead(monkeypatch):
+    """Total sourcing failure is a different emergency from unreachable leads."""
+    _email_settings(monkeypatch)
+    dead_only = {
+        name: {"fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+               "verdict": "dead: fetched nothing"}
+        for name in ("uk_contract", "upwork_rss")
+    }
+
+    notify.send_digest(
+        dict(_stats(), queued=0, emailed=0, contactable=0, by_source=dead_only), []
+    )
+    subject = _FakeSMTP.sent[0]["Subject"]
+    assert "EVERY SOURCE DEAD" in subject
+    assert "uk_contract" in subject
+
+
+def test_digest_without_source_data_omits_the_section(monkeypatch):
+    """Older runs (and the reply/followup digests) carry no by_source key."""
+    _email_settings(monkeypatch)
+
+    notify.send_digest(_stats(), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+    assert "BY SOURCE" not in body
+
+
 def test_digest_still_sends_when_kpis_are_unavailable(monkeypatch):
     """KPIs are a nice-to-have in the digest; they must never block the digest."""
     _email_settings(monkeypatch)

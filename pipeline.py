@@ -163,6 +163,53 @@ def _fit_summary(scores: list[int], threshold: int) -> dict:
     }
 
 
+def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
+    """Attribute the funnel to each source, so targeting can be fixed with evidence.
+
+    ``_fit_summary`` can say "the lead mix is off-ICP" but not WHICH sources produced
+    the off-ICP mix. With 7 sources enabled that leaves the actual fix — drop the dead
+    ones, expand the productive one — as guesswork, and a run that fetches 46 leads and
+    qualifies 0 looks equally like "all sources are mediocre" and "six are useless and
+    one is good". Those need opposite responses.
+
+    A source that yields leads but never a *contactable* one is a distinct failure from
+    one that yields nothing: the first is costing LLM scoring spend every run for leads
+    that can never be emailed, and it is invisible in the totals.
+    """
+    out: dict[str, dict] = {}
+    for name, row in sorted(rows.items()):
+        scores = sorted(row.get("scores") or [])
+        entry = {
+            "fetched": row.get("fetched", 0),
+            "new": row.get("new", 0),
+            "contactable": row.get("contactable", 0),
+            "queued": row.get("queued", 0),
+            "scored": len(scores),
+        }
+        if scores:
+            entry["p50"] = scores[len(scores) // 2]
+            entry["max"] = scores[-1]
+            entry["passed"] = sum(1 for s in scores if s >= threshold)
+        # Name the per-source verdict rather than leaving it to be inferred from
+        # five numbers. Ordered most- to least-severe.
+        if not entry["fetched"]:
+            entry["verdict"] = "dead: fetched nothing"
+        elif not entry["new"]:
+            entry["verdict"] = "stale: every lead already seen"
+        elif not entry["contactable"]:
+            entry["verdict"] = (
+                "unreachable: leads have no email, so scoring them is wasted spend"
+            )
+        elif not scores:
+            entry["verdict"] = "unscored: pre-gated before reaching the model"
+        elif not entry.get("passed"):
+            entry["verdict"] = f"off-ICP: best score {entry['max']} < {threshold}"
+        else:
+            entry["verdict"] = f"productive: {entry['passed']} cleared {threshold}"
+        out[name] = entry
+    return out
+
+
 def run_pipeline(
     limit: int | None = None,
     sources: list | None = None,
@@ -208,6 +255,14 @@ def run_pipeline(
     # (sources off-ICP), which are opposite fixes. Recorded so min_fit_score can be
     # tuned from evidence instead of guessed.
     fit_scores: list[int] = []
+    # Per-source funnel attribution. Keyed by lead.source; see _per_source_summary.
+    by_source: dict[str, dict] = {}
+
+    def _src(name: str) -> dict:
+        return by_source.setdefault(
+            name,
+            {"fetched": 0, "new": 0, "contactable": 0, "queued": 0, "scores": []},
+        )
 
     def _skip_email(reason: str) -> None:
         emailed_skipped[reason] = emailed_skipped.get(reason, 0) + 1
@@ -218,6 +273,14 @@ def run_pipeline(
 
         srcs = sources if sources is not None else get_default_sources()
         per_source = max(1, (limit or settings.max_leads_per_run))
+
+        # Seed a row for every ENABLED source, including ones that yield nothing.
+        # Attribution built only from returned leads would omit a dead source entirely,
+        # and an absent row reads as "not a problem" — the exact failure this reporting
+        # exists to expose. A source is enabled, so it must appear in the report.
+        for source in srcs:
+            _src(getattr(source, "name", source.__class__.__name__))
+
         leads = fetch_all(srcs, per_source_limit=per_source)
 
         cap = limit if limit is not None else settings.max_leads_per_run
@@ -226,6 +289,12 @@ def run_pipeline(
 
         fetched = len(leads)
         metrics.inc("leads_fetched_total", fetched)
+
+        # Counted after the run cap (so the per-source figures sum to ``fetched``) but
+        # before the seen-already filter, which keeps "returns only leads we've already
+        # seen" distinguishable from "returns nothing at all".
+        for lead in leads:
+            _src(lead.source)["fetched"] += 1
 
         for lead in leads:
             # Dedupe against the DB by (source, external_id).
@@ -243,6 +312,7 @@ def run_pipeline(
                 continue
 
             new += 1
+            _src(lead.source)["new"] += 1
 
             # --- cheap gates BEFORE any LLM spend ---------------------------
             # Extracting a contact costs one regex pass + one cached DNS lookup;
@@ -259,6 +329,7 @@ def run_pipeline(
                 logger.warning("contact pre-check failed for %s: %s", lead.url, exc)
             if has_contact:
                 contactable += 1
+                _src(lead.source)["contactable"] += 1
             elif auto_email and settings.require_contact_before_draft:
                 uncontactable_skipped += 1
                 _skip_email("no_email_pregate")
@@ -275,6 +346,7 @@ def run_pipeline(
             fit_score = int(scored.get("fit_score", 0))
             if scored:
                 fit_scores.append(fit_score)
+                _src(lead.source)["scores"].append(fit_score)
                 metrics.observe("fit_score", fit_score)
                 if fit_score >= settings.min_fit_score:
                     metrics.inc("leads_qualified_total")
@@ -320,6 +392,7 @@ def run_pipeline(
                 lead_db_id = record.id
 
             queued += 1
+            _src(lead.source)["queued"] += 1
             metrics.inc("proposals_drafted_total")
             metrics.observe("proposal_quality", int(verdict.get("quality_score", 0)))
             queued_leads.append(
@@ -366,6 +439,7 @@ def run_pipeline(
         "budget_exhausted": budget_exhausted,
     }
     stats["fit"] = _fit_summary(fit_scores, settings.min_fit_score)
+    stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
 
     if notify:
         try:
