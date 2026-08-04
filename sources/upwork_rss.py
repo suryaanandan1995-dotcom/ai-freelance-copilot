@@ -9,17 +9,20 @@ Configuration
 Feed URLs come from (in priority order):
 
 1. the ``feeds`` constructor argument, or
-2. the ``COPILOT_UPWORK_FEEDS`` environment variable (comma-separated).
+2. ``COPILOT_UPWORK_FEEDS`` (comma-separated) — read through ``Settings``, so it
+   works in ``.env`` as well as the environment.
 
-Example::
+There is **no default**: with neither set this source yields nothing. That is why the
+setting has to be read where the operator actually writes config.
 
-    export COPILOT_UPWORK_FEEDS="https://www.upwork.com/ab/feed/jobs/rss?q=devops&sort=recency,https://www.upwork.com/ab/feed/jobs/rss?q=kubernetes"
+Example (in ``.env`` or exported)::
+
+    COPILOT_UPWORK_FEEDS="https://www.upwork.com/ab/feed/jobs/rss?q=devops&sort=recency,https://www.upwork.com/ab/feed/jobs/rss?q=kubernetes"
 """
 from __future__ import annotations
 
 import hashlib
 import logging
-import os
 
 import feedparser
 
@@ -31,7 +34,16 @@ logger = logging.getLogger(__name__)
 
 
 def _env_feeds() -> list[str]:
-    raw = os.environ.get("COPILOT_UPWORK_FEEDS", "")
+    """Configured feed URLs, via ``Settings`` so ``.env`` is honoured.
+
+    This source has NO built-in default feed list, so it is entirely driven by this
+    setting. Reading ``os.environ`` directly meant a value set in ``.env`` was ignored
+    and the source ran with zero feeds — silently switched off while still reporting a
+    successful, empty fetch.
+    """
+    from config import get_settings
+
+    raw = get_settings().upwork_feeds or ""
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 

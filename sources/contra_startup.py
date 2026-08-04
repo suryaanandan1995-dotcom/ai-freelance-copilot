@@ -10,18 +10,18 @@ Configuration
 Feed URLs come from (in priority order):
 
 1. the ``feeds`` constructor argument, or
-2. the ``COPILOT_STARTUP_FEEDS`` environment variable (comma-separated), or
+2. ``COPILOT_STARTUP_FEEDS`` (comma-separated) — read through ``Settings``, so it
+   works in ``.env`` as well as the environment, or
 3. a single sensible public default (:data:`DEFAULT_FEED`).
 
-Example::
+Example (in ``.env`` or exported)::
 
-    export COPILOT_STARTUP_FEEDS="https://example-startup-board.com/jobs.rss,https://another/feed.xml"
+    COPILOT_STARTUP_FEEDS="https://example-startup-board.com/jobs.rss,https://another/feed.xml"
 """
 from __future__ import annotations
 
 import hashlib
 import logging
-import os
 
 import feedparser
 
@@ -45,7 +45,15 @@ DEFAULT_FEED = DEFAULT_FEEDS[0]
 
 
 def _env_feeds() -> list[str]:
-    raw = os.environ.get("COPILOT_STARTUP_FEEDS", "")
+    """Configured feed overrides, via ``Settings`` so ``.env`` is honoured.
+
+    Reading ``os.environ`` directly meant a value set in ``.env`` — where every other
+    setting in this project lives — was silently ignored and the module defaults used
+    instead.
+    """
+    from config import get_settings
+
+    raw = get_settings().startup_feeds or ""
     return [u.strip() for u in raw.split(",") if u.strip()]
 
 

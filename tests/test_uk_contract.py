@@ -110,6 +110,43 @@ def test_missing_credentials_warns_loudly_and_returns_empty(monkeypatch, caplog)
     assert "developer.adzuna.com" in text  # tells the operator how to fix it
 
 
+def test_credentials_set_only_in_dotenv_are_honoured(monkeypatch, tmp_path, caplog):
+    """Keys in `.env` must work, not just keys exported into the environment.
+
+    This source used to read ``os.environ`` directly. pydantic-settings loads ``.env``
+    into the ``Settings`` object and NEVER into ``os.environ``, so an operator who put
+    the keys in ``.env`` — the file every other setting in this project lives in — got
+    a source that reported itself DISABLED. That message reads as "you never configured
+    it" when the truth was "your config is being ignored", which is the more expensive
+    of the two to debug: the fix looks already applied.
+    """
+    import config
+    import sources.uk_contract as uk
+
+    monkeypatch.delenv("COPILOT_ADZUNA_APP_ID", raising=False)
+    monkeypatch.delenv("COPILOT_ADZUNA_APP_KEY", raising=False)
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "COPILOT_ADZUNA_APP_ID=from-dotenv\nCOPILOT_ADZUNA_APP_KEY=key-from-dotenv\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        uk, "get_settings", lambda: config.Settings(_env_file=str(env_file))
+    )
+
+    assert uk._credentials() == ("from-dotenv", "key-from-dotenv")
+
+    captured: list[dict] = []
+    _install(monkeypatch, PAYLOAD, capture=captured)
+    with caplog.at_level("WARNING"):
+        leads = uk.UKContractSource().fetch(limit=5)
+
+    assert "DISABLED" not in caplog.text
+    assert leads, "a configured source must actually fetch"
+    assert captured[0]["app_id"] == "from-dotenv"
+
+
 def test_partial_credentials_also_disabled(monkeypatch, caplog):
     monkeypatch.setenv("COPILOT_ADZUNA_APP_ID", "only-id")
     monkeypatch.delenv("COPILOT_ADZUNA_APP_KEY", raising=False)
