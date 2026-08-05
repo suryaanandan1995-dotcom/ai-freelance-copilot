@@ -41,7 +41,9 @@ _FIT_MAX = 90
 
 def _default_strategy() -> dict:
     settings = get_settings()
-    fit = int(getattr(settings, "outreach_min_fit", 80) or 80)
+    # Fallback matches the config default (70). A hardcoded 80 here would silently
+    # restore the unclearable threshold whenever the field is absent or zero.
+    fit = int(getattr(settings, "outreach_min_fit", 70) or 70)
     return {
         "pitch_variant": PITCH_VARIANTS[0],
         "subject_style": SUBJECT_STYLES[0],
