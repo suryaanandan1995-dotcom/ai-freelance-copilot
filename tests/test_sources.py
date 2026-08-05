@@ -348,15 +348,16 @@ def test_get_default_sources_are_the_live_ones():
     """Only sources measured to actually return leads are enabled by default.
 
     ``upwork_rss`` (HTTP 410 Gone) and ``reddit_forhire`` (403 from datacenter IPs)
-    were dropped on 2026-08-03 after 24 production runs; ``uk_contract`` (Adzuna)
-    was added because UK contract roles are the actual target market.
+    were dropped on 2026-08-03 after 24 production runs; ``contract_jobs`` (Adzuna)
+    was added because day-rate contract roles are the actual target market. It was
+    called ``uk_contract`` until it grew past the UK — renamed, not quietly widened.
     """
     sources = registry.get_default_sources()
     assert all(isinstance(s, LeadSource) for s in sources)
     names = {s.name for s in sources}
     assert names == {
         "hn_hiring",
-        "uk_contract",
+        "contract_jobs",
         "remote_boards",
         "jobicy",
         "working_nomads",
@@ -376,7 +377,7 @@ def test_default_sources_lead_with_contactable_yield():
     """
     names = [s.name for s in registry.get_default_sources()]
     assert names[0] == "hn_hiring"
-    assert names.index("uk_contract") < names.index("remote_boards")
+    assert names.index("contract_jobs") < names.index("remote_boards")
 
 
 def test_fetch_all_dedupes_across_sources():

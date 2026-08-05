@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     whatsapp_to: str = ""         # recipient in international format, e.g. 9190XXXXXXXX
 
     # --- lead sources ---
-    # Adzuna (free tier, https://developer.adzuna.com) backs the uk_contract source,
+    # Adzuna (free tier, https://developer.adzuna.com) backs the contract_jobs source,
     # the primary UK day-rate contract feed. Declared here rather than read straight
     # from os.environ: pydantic-settings loads .env into THIS object and never into
     # os.environ, so a source reading os.environ.get("COPILOT_ADZUNA_APP_ID") sees

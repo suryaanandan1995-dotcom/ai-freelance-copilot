@@ -34,9 +34,9 @@ jobs:
       COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
       COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
       COPILOT_AUTO_EMAIL: "true"
-      # Adzuna keys for the uk_contract source (developer.adzuna.com, free tier).
+      # Adzuna keys for the contract_jobs source (developer.adzuna.com, free tier).
       # Actions reads repo SECRETS, never .env — so setting these locally does
-      # nothing here, and without them uk_contract logs DISABLED and yields zero.
+      # nothing here, and without them contract_jobs logs DISABLED and yields zero.
       # That is the highest-fit source in the mix; the rest are remote job boards
       # whose leads score p50 22 against a bar of 70.
       COPILOT_ADZUNA_APP_ID: ${{ secrets.COPILOT_ADZUNA_APP_ID }}

@@ -16,6 +16,7 @@ import pytest
 
 from sources._keywords import (
     STRONG_TITLE_KEYWORDS,
+    excluded_title,
     extract_tags,
     is_ai_infra,
     matches_keywords,
@@ -210,3 +211,62 @@ def test_extract_tags_dedupes_and_orders_by_keyword_list():
 def test_extract_tags_empty():
     assert extract_tags("") == []
     assert extract_tags(None) == []
+
+
+# --------------------------------------------------------------------------- #
+# excluded_title
+# --------------------------------------------------------------------------- #
+def test_non_engineering_titles_are_excluded():
+    """The keyword gate reads title AND description, so one tech word anywhere passes.
+
+    Every title here was returned by a live Adzuna contract fetch on 2026-08-05 and
+    every one passed `matches_keywords`: "Marketing Manager" on the word "agentic" in
+    its body, "Account-Based Marketing Mgr" on "AWS" (the role is at AWS), "Strategic
+    Sourcing Principal" on "Azure". Each cost a Claude call to score and none was
+    qualifiable.
+    """
+    for title in (
+        "WPP Media: Marketing Manager - 12 Month FTC",
+        "Amazon Web Services: Account-Based Marketing Mgr",
+        "Microsoft: Strategic Sourcing Principal",
+        "LAB3: Senior Project Manager",
+        "Mindrift: Freelance Annotator (English)",
+        "Enterprise Sales Executive",
+        "Technical Recruiter - Cloud",
+    ):
+        assert excluded_title(title), title
+
+
+def test_real_engineering_titles_survive():
+    """An over-strict gate is the mirror failure: it looks like an empty market."""
+    for title in (
+        "Senior DevOps Engineer (Kubernetes, Terraform)",
+        "Sr Forward Deployed Engineer",
+        "LLM Platform Engineer",
+        "Site Reliability Engineer",
+        "Solutions Architect",
+        "Cloud Engineer Content Hub",
+        "AI Product Orchestrator",
+    ):
+        assert excluded_title(title) is None, title
+
+
+def test_exclusion_reports_which_word_matched():
+    """A bool would make an over-strict gate indistinguishable from an empty market."""
+    assert excluded_title("Head of Marketing Operations") == "marketing"
+    assert excluded_title("Delivery Manager, Platform") == "delivery manager"
+
+
+def test_exclusion_only_matches_whole_words():
+    """"sales" must not match inside "wholesales"; the gate is word-boundary-ish."""
+    assert excluded_title("Wholesales Data Engineer") is None
+    assert excluded_title("Presales Engineer") is None
+
+
+def test_exclusion_looks_at_the_title_only():
+    """A description mentioning sales is normal — every product has customers.
+
+    Only a *title* is decisive, which is why this function takes one string.
+    """
+    assert excluded_title(None) is None
+    assert excluded_title("") is None
