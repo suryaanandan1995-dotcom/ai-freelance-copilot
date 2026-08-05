@@ -216,7 +216,7 @@ def test_missing_salary_yields_no_budget(creds, monkeypatch):
 # request shape
 # --------------------------------------------------------------------------- #
 def test_requests_contract_only_and_recent(creds, monkeypatch):
-    """Permanent roles are not the product: contract_only must always be set."""
+    """Permanent roles are not the product: the contract filter must always be set."""
     captured: list[dict] = []
     _install(monkeypatch, PAYLOAD, capture=captured)
     UKContractSource(queries=("devops",), locations=("London",), max_days_old=7).fetch(
@@ -225,7 +225,7 @@ def test_requests_contract_only_and_recent(creds, monkeypatch):
 
     assert captured, "no request was made"
     params = captured[0]
-    assert params["contract_only"] == 1
+    assert params["contract"] == 1
     assert params["max_days_old"] == 7
     assert params["sort_by"] == "date"
     assert params["where"] == "London"
@@ -251,6 +251,70 @@ def test_dedupes_the_same_job_across_queries(creds, monkeypatch):
     ids = [lead.external_id for lead in src.fetch(limit=50)]
     assert ids == sorted(set(ids), key=ids.index)
     assert len(ids) == 2
+
+
+def test_only_parameters_the_real_api_accepts_are_sent(creds, monkeypatch):
+    """Every parameter name must be one Adzuna actually documents.
+
+    This is the test that was missing. ``contract_only=1`` was sent for the life of
+    this source and the real API answered *every* request with a 400 HTML error page,
+    yet the assertion ``params["contract_only"] == 1`` passed — the mock accepted any
+    name a real server would reject, so the test pinned the bug in place instead of
+    catching it. Asserting the corrected name is not enough; the mock has to be as
+    strict as the server, or the next invented parameter passes too.
+    """
+    # https://developer.adzuna.com/activedocs — search endpoint query parameters.
+    allowed = {
+        "app_id", "app_key", "what", "what_and", "what_or", "what_phrase",
+        "what_exclude", "title_only", "where", "distance", "location0",
+        "location1", "max_days_old", "category", "sort_dir", "sort_by",
+        "salary_min", "salary_max", "salary_include_unknown", "full_time",
+        "part_time", "contract", "permanent", "company", "results_per_page",
+        "page", "content-type",
+    }
+    captured: list[dict] = []
+    _install(monkeypatch, PAYLOAD, capture=captured)
+    UKContractSource().fetch(limit=5)
+
+    assert captured, "no request was made"
+    for params in captured:
+        unknown = set(params) - allowed
+        assert not unknown, f"Adzuna would answer 400 for: {sorted(unknown)}"
+
+
+def test_a_rejected_request_is_reported_as_broken_not_empty(creds, monkeypatch):
+    """An HTTP error must leave a reason behind, not just an empty list.
+
+    Returning [] in silence made "the API rejected our filter" identical to "no jobs
+    matched": the funnel report called it ``dead: fetched nothing`` and pointed at the
+    queries, while the actual fix was one parameter name in this file.
+    """
+    _install(monkeypatch, PAYLOAD, fail=True)
+    src = UKContractSource(queries=("devops",), locations=("London",))
+    assert src.fetch() == []
+    assert src.last_error, "a failed fetch must record why"
+    assert "ConnectError" in src.last_error
+
+
+def test_a_recovered_source_stops_reporting_a_stale_error(creds, monkeypatch):
+    """last_error is per-fetch, so a fixed source doesn't look broken forever."""
+    _install(monkeypatch, PAYLOAD, fail=True)
+    src = UKContractSource(queries=("devops",), locations=("London",))
+    src.fetch()
+    assert src.last_error
+
+    _install(monkeypatch, PAYLOAD)
+    assert src.fetch(limit=5)
+    assert src.last_error is None
+
+
+def test_an_unconfigured_source_says_so_rather_than_looking_dead(monkeypatch):
+    """No key is a different problem from no results, so it gets its own reason."""
+    monkeypatch.setenv("COPILOT_ADZUNA_APP_ID", "")
+    monkeypatch.setenv("COPILOT_ADZUNA_APP_KEY", "")
+    src = UKContractSource(queries=("devops",), locations=("London",))
+    assert src.fetch() == []
+    assert src.last_error and "not configured" in src.last_error
 
 
 def test_network_error_returns_empty(creds, monkeypatch):

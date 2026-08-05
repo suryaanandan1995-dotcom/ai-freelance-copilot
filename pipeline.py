@@ -224,7 +224,14 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             entry["passed"] = sum(1 for s in scores if s >= threshold)
         # Name the per-source verdict rather than leaving it to be inferred from
         # five numbers. Ordered most- to least-severe.
-        if not fetched:
+        error = row.get("error")
+        if error:
+            # An adapter that reported *why* it failed outranks every count below:
+            # "broken" and "dead" need opposite responses (fix the caller vs. retire
+            # the source), and the counts alone cannot tell them apart.
+            entry["error"] = error
+            entry["verdict"] = f"broken: {error}"
+        elif not fetched:
             entry["verdict"] = "dead: fetched nothing"
         elif not considered:
             # The source worked; the run cap spent its whole budget elsewhere. Blaming
@@ -327,6 +334,16 @@ def run_pipeline(
             _src(getattr(source, "name", source.__class__.__name__))
 
         leads = fetch_all(srcs, per_source_limit=per_source)
+
+        # Sources that record why they came back empty get to say so. Adapters swallow
+        # transport errors and return [] by contract (they must never abort a run), which
+        # made "the API rejected our request" look exactly like "nothing matched" —
+        # uk_contract sent an invalid filter name for its entire life and every run
+        # reported it as ``dead: fetched nothing``, pointing at queries instead of code.
+        for source in srcs:
+            err = getattr(source, "last_error", None)
+            if err:
+                _src(getattr(source, "name", source.__class__.__name__))["error"] = err
 
         # ``fetched`` is counted BEFORE the run cap, so it means "what the source
         # returned" and nothing else. Counting it after made the number a function of

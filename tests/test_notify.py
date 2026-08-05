@@ -301,6 +301,44 @@ def test_starved_sources_rank_just_below_dead_ones(monkeypatch):
     assert "considered=0" in body
 
 
+def test_a_broken_source_sorts_above_a_dead_one(monkeypatch):
+    """`broken` is the only verdict that is fixable today, so it reads first."""
+    _email_settings(monkeypatch)
+    rows = dict(_by_source())
+    rows["contra_startup"] = {
+        "fetched": 0, "considered": 0, "new": 0, "contactable": 0, "queued": 0,
+        "error": "HTTPStatusError: 400 Bad Request",
+        "verdict": "broken: HTTPStatusError: 400 Bad Request",
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    assert body.index("contra_startup") < body.index("uk_contract")
+    assert "400 Bad Request" in body
+
+
+def test_subject_names_a_broken_source_even_on_a_run_that_queued_drafts(monkeypatch):
+    """A rejected request is a code defect; three drafts must not bury it.
+
+    uk_contract's 400 survived a month of green runs whose subjects read as successes.
+    """
+    _email_settings(monkeypatch)
+    rows = dict(_by_source())
+    rows["uk_contract"] = {
+        "fetched": 0, "considered": 0, "new": 0, "contactable": 0, "queued": 0,
+        "error": "HTTPStatusError: 400 Bad Request",
+        "verdict": "broken: HTTPStatusError: 400 Bad Request",
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    subject = _FakeSMTP.sent[0]["Subject"]
+    assert "3 draft(s)" in subject, "precondition: this is a successful-looking run"
+
+    assert "uk_contract" in subject
+    assert "BROKEN" in subject
+
+
 def test_digest_without_source_data_omits_the_section(monkeypatch):
     """Older runs (and the reply/followup digests) carry no by_source key."""
     _email_settings(monkeypatch)

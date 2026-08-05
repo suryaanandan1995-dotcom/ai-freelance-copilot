@@ -385,6 +385,68 @@ def test_a_source_starved_by_the_run_cap_is_not_called_dead():
     assert "max_leads_per_run" in out["jobicy"]["verdict"]
 
 
+def test_a_source_that_errored_is_reported_broken_not_dead():
+    """`dead` blames the market; `broken` blames the code. Opposite fixes.
+
+    `uk_contract` sent Adzuna an invalid filter name and got a 400 on every request for
+    the life of the source. Because adapters swallow errors and return [], the report
+    said `dead: fetched nothing` — pointing at the queries instead of the one word of
+    code that was wrong.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"uk_contract": {"fetched": 0, "considered": 0, "new": 0, "contactable": 0,
+                         "queued": 0, "scores": [],
+                         "error": "HTTPStatusError: 400 Bad Request"}},
+        threshold=70,
+    )
+    verdict = out["uk_contract"]["verdict"]
+    assert verdict.startswith("broken")
+    assert "dead" not in verdict
+    # The digest is the only thing read, so the reason has to travel with the verdict.
+    assert "400" in verdict
+
+
+def test_the_error_verdict_outranks_every_healthy_looking_count():
+    """A source can fail *and* have counts, e.g. one query of five was rejected."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"uk_contract": {"fetched": 7, "considered": 7, "new": 7, "contactable": 3,
+                         "queued": 1, "scores": [80],
+                         "error": "ConnectError: timed out"}},
+        threshold=70,
+    )
+    # Without this, a partial outage hides behind "productive" and is never fixed.
+    assert out["uk_contract"]["verdict"].startswith("broken")
+
+
+def test_run_pipeline_collects_the_error_a_source_reported(temp_db):
+    """End-to-end: an adapter's `last_error` has to reach the funnel report.
+
+    The adapter recording it is useless if nothing reads the attribute.
+    """
+    from pipeline import run_pipeline
+
+    class BrokenSource:
+        name = "uk_contract"
+        last_error = "HTTPStatusError: 400 Bad Request"
+
+        def fetch(self, limit: int = 50):
+            return []
+
+    stats = run_pipeline(
+        sources=[BrokenSource(), FakeSource([_lead(1)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+    assert stats["by_source"]["uk_contract"]["verdict"].startswith("broken")
+    assert "400" in stats["by_source"]["uk_contract"]["error"]
+    # A healthy source alongside it must not be tarred with the same brush.
+    assert not stats["by_source"]["upwork_rss"]["verdict"].startswith("broken")
+
+
 def test_a_source_that_truly_fetched_nothing_is_still_dead():
     """The starved check must not swallow the real failure it sits next to."""
     from pipeline import _per_source_summary
