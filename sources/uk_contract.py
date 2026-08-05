@@ -125,6 +125,12 @@ class UKContractSource(LeadSource):
         self.locations = locations
         self.base_url = base_url
         self.max_days_old = max_days_old
+        #: Last transport/HTTP failure, or None if every request succeeded. Read by
+        #: the funnel report so "the API rejected us" is not reported as "no jobs
+        #: matched": a swallowed 400 and a genuinely empty market both returned []
+        #: and both surfaced as ``dead: fetched nothing``, which names the wrong
+        #: lever — one needs a code fix, the other needs different queries.
+        self.last_error: str | None = None
 
     def _job_to_lead(self, job: dict) -> Lead | None:
         job_id = job.get("id")
@@ -161,7 +167,13 @@ class UKContractSource(LeadSource):
             "what_or": query,
             "where": where,
             "results_per_page": min(50, max(1, limit)),
-            "contract_only": 1,  # day-rate contracts only, not permanent roles
+            # Day-rate contracts only, not permanent roles. The parameter is
+            # ``contract``, NOT ``contract_only``: Adzuna answers an unknown filter
+            # name with a 400 HTML error page, so every single request this source
+            # ever made failed. The unit test asserting ``contract_only == 1`` passed
+            # anyway, because the mocked client accepts any parameter name a real
+            # server would reject — a test that pinned the bug it existed to prevent.
+            "contract": 1,
             "max_days_old": self.max_days_old,
             "sort_by": "date",
             "content-type": "application/json",
@@ -172,6 +184,7 @@ class UKContractSource(LeadSource):
             payload = resp.json()
         except Exception as exc:
             logger.warning("uk_contract: fetch failed for %r/%r: %s", query, where, exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return []
 
         results = payload.get("results", []) if isinstance(payload, dict) else []
@@ -191,8 +204,10 @@ class UKContractSource(LeadSource):
         return leads
 
     def fetch(self, limit: int = 50) -> list[Lead]:
+        self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
         app_id, app_key = _credentials()
         if not app_id or not app_key:
+            self.last_error = "not configured: no Adzuna app id/key"
             logger.warning(
                 "uk_contract: DISABLED — set COPILOT_ADZUNA_APP_ID and "
                 "COPILOT_ADZUNA_APP_KEY (free key: https://developer.adzuna.com). "

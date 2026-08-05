@@ -55,12 +55,15 @@ def _source_lines(stats: dict) -> list[str]:
     if not rows:
         return []
     order = {
-        "dead": 0,
-        "starved": 1,
-        "stale": 2,
-        "unreachable": 3,
-        "unscored": 4,
-        "off-ICP": 5,
+        # "broken" ranks above "dead": it is the only verdict that blames the code
+        # rather than the market, so it is the only one fixable the same day.
+        "broken": 0,
+        "dead": 1,
+        "starved": 2,
+        "stale": 3,
+        "unreachable": 4,
+        "unscored": 5,
+        "off-ICP": 6,
     }
 
     def rank(item) -> tuple[int, str]:
@@ -200,11 +203,25 @@ def _send_email(stats: dict, top_leads: list[dict]) -> bool:
     # A dead source is named in the subject, because the body is skimmed and this is
     # the one failure that makes every downstream number meaningless.
     rows = stats.get("by_source") or {}
-    dead = sorted(n for n, r in rows.items() if (r.get("verdict") or "").startswith("dead"))
+
+    def _with_verdict(prefix: str) -> list[str]:
+        return sorted(
+            n for n, r in rows.items() if (r.get("verdict") or "").startswith(prefix)
+        )
+
+    dead = _with_verdict("dead")
+    # A *broken* source is named ahead of a dead one even on an otherwise good run:
+    # it means a request is being rejected, which is a code fix available today,
+    # whereas "dead" may just be an empty market.
+    broken = _with_verdict("broken")
     if queued or emailed:
         subject = f"[Copilot] {queued} draft(s), {emailed} email(s) sent"
-        if dead:
+        if broken:
+            subject += f" — {', '.join(broken[:2])} BROKEN"
+        elif dead:
             subject += f" — {len(dead)} dead source(s)"
+    elif broken:
+        subject = f"[Copilot] SOURCE BROKEN — {', '.join(broken[:3])}"
     elif contactable:
         subject = f"[Copilot] NOTHING QUEUED — {contactable} contactable, 0 drafted"
     elif dead and len(dead) == len(rows):

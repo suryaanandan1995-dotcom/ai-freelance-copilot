@@ -213,10 +213,11 @@ BY SOURCE (worst first — retire what never produces)
   hn_hiring        fetched=12   new=12   contactable=7    queued=0   off-ICP: best score 68 < 70
 ```
 
-The five verdicts are deliberately distinct failures, not severity grades:
+The verdicts are deliberately distinct failures, not severity grades:
 
 | verdict | meaning | fix |
 | --- | --- | --- |
+| `broken` | the adapter reported an error | fix the request; the source is fine |
 | `dead` | fetched nothing at all | credentials, or the endpoint is gone |
 | `starved` | fetched leads, none survived the run cap | raise `max_leads_per_run` |
 | `stale` | fetched only leads already in the DB | widen the query, or retire it |
@@ -241,6 +242,20 @@ when they had never been reached. A wrong verdict is worse than a missing one, b
 gets acted on: the fix would have been to debug six healthy sources. `fetched` is now
 counted before the cap, the cap **interleaves** across sources instead of truncating a
 prefix, and being cut off by the cap has its own verdict naming its own lever.
+
+The `broken` verdict has the same origin. `uk_contract` sent Adzuna a filter named
+`contract_only`; the real parameter is `contract`, and Adzuna answers an unknown filter
+name with an HTTP 400 — so **every request that source ever made failed**. Adapters
+swallow transport errors and return `[]` by contract (a bad feed must never abort a run),
+which made "the API rejected us" indistinguishable from "no jobs matched": the report said
+`dead: fetched nothing` and pointed at the queries, when the fix was one word of code.
+Sources now record a `last_error`, and a source that failed is never called dead.
+
+Its unit test asserted `params["contract_only"] == 1` and passed for the life of the bug,
+because the mocked HTTP client accepts any parameter name a real server would reject — a
+test that pinned the defect it existed to prevent. Renaming the assertion would not have
+helped; the mock is now **as strict as the server**, failing on any parameter Adzuna does
+not document, so the next invented parameter cannot pass either.
 
 Each run also reports its **fit-score distribution** rather than a bare `dropped: 34`,
 since that number has two causes needing opposite fixes: scores clustered just below the
