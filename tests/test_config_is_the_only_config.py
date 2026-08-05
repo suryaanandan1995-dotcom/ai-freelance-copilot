@@ -7,7 +7,7 @@ invisible to the file the operator actually edits: the value is set, and ignored
 That failure mode is worse than a crash. The source reports itself DISABLED, or quietly
 falls back to a default, and the message reads as "you never configured it" when the
 truth is "your config is being ignored" — so the operator re-applies a fix that was
-already applied. Three sources shipped this way (uk_contract, contra_startup,
+already applied. Three sources shipped this way (contract_jobs, contra_startup,
 upwork_rss); upwork_rss has no default feed list, so being ignored switched it off
 entirely while it still reported a successful, empty fetch.
 

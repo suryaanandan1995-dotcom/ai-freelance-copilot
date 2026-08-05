@@ -182,6 +182,69 @@ def matches_keywords(*texts: str | None) -> bool:
     return any(pat.search(blob) for _, pat in _PATTERNS)
 
 
+#: Job-title words that mean "not an engineering role", however good the tech
+#: keywords in the body look.
+#:
+#: The gate above searches the title *and description together*, which is deliberate —
+#: a genuine role often names its stack only in the body. But it means one tech word
+#: anywhere in a long description passes the whole listing, and job descriptions are
+#: full of them: a live Adzuna fetch on 2026-08-05 qualified "Marketing Manager"
+#: (its body mentions "agentic"), "Account-Based Marketing Mgr" ("AWS" — at AWS),
+#: "Strategic Sourcing Principal" ("Azure") and four Project Manager roles. Those
+#: cost a Claude call each to score and are unqualifiable by construction.
+#:
+#: Titles are the right place for this. A description mentioning "sales" is normal
+#: (every product has customers); a *title* containing it is decisive.
+EXCLUDED_TITLE_WORDS: tuple[str, ...] = (
+    "sales",
+    "account executive",
+    "account manager",
+    "account-based",
+    "business development",
+    "marketing",
+    "recruiter",
+    "recruitment consultant",
+    "talent acquisition",
+    "procurement",
+    "sourcing principal",
+    "buyer",
+    "project manager",
+    "programme manager",
+    "program manager",
+    "scrum master",
+    "delivery manager",
+    "product manager",
+    "product owner",
+    "business analyst",
+    "annotator",
+    "data annotation",
+    "teacher",
+    "lecturer",
+    "nurse",
+    "driver",
+)
+
+_EXCLUDED_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    _compile(w) for w in EXCLUDED_TITLE_WORDS
+)
+
+
+def excluded_title(title: str | None) -> str | None:
+    """The excluded word found in ``title``, or None if the title is acceptable.
+
+    Returns the *word* rather than a bool so callers can log why a listing was
+    dropped: a filter that silently discards is how you end up unable to tell an
+    over-strict gate from an empty market.
+    """
+    if not title:
+        return None
+    low = title.lower()
+    for word, pat in zip(EXCLUDED_TITLE_WORDS, _EXCLUDED_PATTERNS, strict=True):
+        if pat.search(low):
+            return word
+    return None
+
+
 def extract_tags(*texts: str | None) -> list[str]:
     """Return the subset of KEYWORDS found in the texts (deduped, ordered)."""
     blob = " ".join(t for t in texts if t).lower()

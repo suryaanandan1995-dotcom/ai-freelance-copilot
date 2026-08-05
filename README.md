@@ -69,7 +69,7 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 |--------|---------------|
 | **HN "Who is hiring"** | The two most recent monthly Hacker News hiring threads (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. Comments are ranked by *contact-hint then AI-infra relevance* **before** the per-run limit truncates them, so the leads that survive are the ones that can actually be emailed. |
 | **HN "Freelancer? Seeking freelancer?"** | The companion monthly thread, where the poster is explicitly hiring a contractor. |
-| **UK day-rate contract** *(optional)* | Adzuna's official UK jobs API, `contract_only=1` — the segment that actually pays day rates (£525–£550/day DevOps, **£550 median for LLM roles with vacancies up +247% YoY**). Off unless you set `COPILOT_ADZUNA_APP_ID` + `COPILOT_ADZUNA_APP_KEY` (free key: [developer.adzuna.com](https://developer.adzuna.com)); returns nothing, with a log line, when unconfigured. |
+| **Day-rate contract** *(optional)* | Adzuna's official jobs API across **10 country endpoints** — UK (onsite *and* remote) plus remote-only in the US, Germany, Netherlands, France, Australia, New Zealand, Switzerland, Austria and Belgium. This is the segment that actually pays day rates (£525–£550/day DevOps, **£550 median for LLM roles with vacancies up +247% YoY**), and the volume is mostly *outside* the UK: 16,223 remote contract vacancies in the US against 3,687 in the UK. Off unless you set `COPILOT_ADZUNA_APP_ID` + `COPILOT_ADZUNA_APP_KEY` (free key: [developer.adzuna.com](https://developer.adzuna.com)); returns nothing, with a log line, when unconfigured. |
 | **Remote boards** | RemoteOK, WeWorkRemotely & Remotive feeds — works out of the box, no config. |
 | **Jobicy / Working Nomads** | Two further remote-jobs feeds, no config. |
 | **Contra / startup** | Startup-oriented opportunity feeds (configurable via `COPILOT_STARTUP_FEEDS`), deduped across feeds since aggregators syndicate each other. |
@@ -78,6 +78,44 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 > Most board listings (Upwork, LinkedIn, remote boards) link back to a platform and expose **no direct email**, so they stay human-submit. The Hacker News threads are the exception — and the only place the auto-email channel sends to.
 >
 > **`reddit_forhire` was removed, not disabled.** Reddit began returning `403 Blocked` to unauthenticated JSON requests; the adapter contributed nothing but a failing HTTP call on every run for a month. A source that cannot fetch is deleted rather than left in the registry looking operational.
+
+### Which markets, and three ways that went wrong
+
+Remote contract work isn't geographically bounded, so the contract source spans the UK,
+the US, the EU and ANZ. The UK is searched **onsite and remote** (that's where the
+contractor is); every other market is **remote-only**, because a role requiring
+relocation is not a lead and paying an LLM to qualify one is pure cost.
+
+Getting there surfaced three traps, all of the same family — a filter that looks right
+and fails quietly:
+
+| what looked right | what it actually did |
+| --- | --- |
+| `where=Remote` on the US endpoint | returned **0** of 4,816 matches; the endpoint already scopes the country, and any `where` on top of the remote phrase zeroes the set. `where=Germany` on the German endpoint: 0 of 104. |
+| `where=remote` as the remote filter | 0 results in **every** country. The working filter is `what_phrase=remote`. |
+| a bare Adzuna job id as `external_id` | ids are unique *per country endpoint*, not globally — so a German role could collide with a British one and be dropped as a duplicate, silently, because dedupe logs nothing. Ids are now namespaced `de:1234`. |
+
+A fourth, separate leak: the keyword gate reads the title **and** description together —
+deliberately, since a genuine role often names its stack only in the body. But that means
+one tech word anywhere in a long description passes the whole listing, and job
+descriptions are full of them. A live fetch qualified *Marketing Manager* (its body says
+"agentic"), *Account-Based Marketing Mgr* ("AWS" — the role is at AWS), *Strategic
+Sourcing Principal* ("Azure") and four Project Manager roles. Each cost a Claude call to
+score and none was qualifiable. Titles are now screened against an exclusion list, which
+returns *which word matched* rather than a bool — a silent filter makes an over-strict
+gate indistinguishable from an empty market, and this project has shipped that bug
+before.
+
+Salary figures carry the **currency of their endpoint** and are never converted: an
+approximate rate in a proposal is a wrong number, and a wrong number is worse than no
+number. The same reasoning already stops the annualised figure being back-computed into
+a guessed day rate.
+
+Transient failures are retried (2 attempts, exponential backoff) but **400/401/403/404
+are not** — those fail identically forever, so retrying only delays the report that
+would fix them. Without the retry, Adzuna's sporadic free-tier 503s marked the whole
+source `broken`, which is how you teach yourself to ignore the one verdict that means
+"there is a bug".
 
 ## Auto-Email Outreach
 
@@ -208,7 +246,8 @@ So every run attributes the funnel per source and states a verdict, worst first:
 
 ```text
 BY SOURCE (worst first — retire what never produces)
-  uk_contract      fetched=0    new=0    contactable=0    queued=0   dead: fetched nothing
+  contract_jobs    fetched=0    new=0    contactable=0    queued=0   broken: HTTPStatusError: 400 Bad Request
+  hn_freelancer    fetched=0    new=0    contactable=0    queued=0   dead: fetched nothing
   remote_boards    fetched=25   new=25   contactable=0    queued=0   unreachable: leads have no email, so scoring them is wasted spend
   hn_hiring        fetched=12   new=12   contactable=7    queued=0   off-ICP: best score 68 < 70
 ```
@@ -230,7 +269,8 @@ Two properties matter more than the table itself:
 - **A row is seeded for every *enabled* source before fetching**, so a source that yields
   nothing still appears. Building the table from returned leads would omit it entirely,
   and an absent row reads as "not a problem" — which is the failure this report exists to
-  expose. `uk_contract` sat `DISABLED` through a month of green runs.
+  expose. `contract_jobs` (then named `uk_contract`) sat `DISABLED` through a month of
+  green runs.
 - **Dead sources sort above working ones, and reach the subject line.** A run that queues
   three drafts *and* has a broken source used to read as unqualified success.
 
@@ -243,7 +283,7 @@ gets acted on: the fix would have been to debug six healthy sources. `fetched` i
 counted before the cap, the cap **interleaves** across sources instead of truncating a
 prefix, and being cut off by the cap has its own verdict naming its own lever.
 
-The `broken` verdict has the same origin. `uk_contract` sent Adzuna a filter named
+The `broken` verdict has the same origin. `contract_jobs` sent Adzuna a filter named
 `contract_only`; the real parameter is `contract`, and Adzuna answers an unknown filter
 name with an HTTP 400 — so **every request that source ever made failed**. Adapters
 swallow transport errors and return `[]` by contract (a bad feed must never abort a run),

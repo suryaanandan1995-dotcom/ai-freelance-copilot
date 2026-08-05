@@ -6,11 +6,11 @@ import logging
 from core.schemas import Lead
 from sources.base import LeadSource, dedupe
 from sources.contra_startup import ContraStartupSource
+from sources.contract_jobs import ContractJobsSource
 from sources.hn_freelancer import HNFreelancerSource
 from sources.hn_hiring import HNWhoIsHiringSource
 from sources.jobicy import JobicySource
 from sources.remote_boards import RemoteBoardsSource
-from sources.uk_contract import UKContractSource
 from sources.working_nomads import WorkingNomadsSource
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def get_default_sources() -> list[LeadSource]:
     """
     return [
         HNWhoIsHiringSource(),
-        UKContractSource(),
+        ContractJobsSource(),
         RemoteBoardsSource(),
         JobicySource(),
         WorkingNomadsSource(),
