@@ -136,7 +136,7 @@ For each freshly **queued, strong-fit** lead, it:
 **Every guardrail is on by default:**
 
 - **Master gate** — nothing sends unless `COPILOT_AUTO_EMAIL=true` *and* `COPILOT_SMTP_HOST` is set. The sender is a hard no-op otherwise, so the default config can never email anyone.
-- **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **80**) are contacted.
+- **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **70**) are contacted. It shipped at **80** and *no production run has ever scored a lead above 78* (measured maxima: 78, 72, 52), so the send path was closed by arithmetic: the pipeline paid Opus prices to draft a proposal, logged `queued: 1`, then discarded it as `low_fit` — and reported the run a success. That is this repo's signature defect, a gate that cannot pass for the reason it exists, and it is why 24 consecutive green runs emailed nobody. The floor is now pinned to `min_fit_score` by [`tests/test_thresholds.py`](tests/test_thresholds.py): **a lead good enough to draft is good enough to send**, since the draft is the expensive half. It is deliberately *not* lower — measured fit p50 is 28 and p90 is 58, and the floor still has to exclude those, because sender reputation is the one asset cold outreach cannot rebuy.
 - **Daily cap** — at most `COPILOT_MAX_EMAILS_PER_DAY` sends per UTC day (code default **20**; the shipped [`.env.example`](.env.example) sets **8**). Low volume protects reply quality, domain reputation, and legality. The cap is counted **across every channel** ([`outreach/quota.py`](outreach/quota.py)) — cold emails and follow-ups draw on one budget, because a sending domain's reputation isn't a property of the code path that used it.
 - **Dedupe** — the `outreach` table has a **UNIQUE** email column; an address is **never emailed twice**, across runs.
 - **Suppression list** — `data/suppressed.txt` (one lowercased email per line) is honored before every send. Drop an address in there to permanently stop emailing it.
@@ -407,7 +407,7 @@ All variables are prefixed `COPILOT_` (see [`.env.example`](.env.example)).
 | `COPILOT_MODEL_SONNET` | `claude-sonnet-4-6` | Cheap model for scoring/triage. |
 | `COPILOT_MAX_USD_PER_RUN` | `2.0` | Hard Claude-spend cap per run. |
 | `COPILOT_MIN_FIT_SCORE` | `70` | Leads below this are dropped. |
-| `COPILOT_MAX_LEADS_PER_RUN` | `50` | Max leads processed per run. |
+| `COPILOT_MAX_LEADS_PER_RUN` | `200` | Max leads processed per run. Raised from 50 after a run fetched **186** leads and scored **50** while spending $0.13 of the $2.00 ceiling — the cap, not cost, was the binding constraint. |
 | `COPILOT_MAX_PROPOSALS_PER_DAY` | `15` | Anti-spam daily draft cap. |
 | `COPILOT_DRY_RUN` / `COPILOT_ALLOW_SEND` | `true` / `false` | Safety flags — auto-send is never enabled. |
 | `COPILOT_NOTIFY_CHANNEL` | `email` | `email` · `whatsapp` · `none`. |

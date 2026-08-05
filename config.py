@@ -61,7 +61,14 @@ class Settings(BaseSettings):
 
     # --- pipeline policy ---
     min_fit_score: int = 70          # leads below this are dropped
-    max_leads_per_run: int = 50
+    # Sized from measurement, not guessed. Run 31033943812 fetched 186 leads across
+    # seven sources and considered only 50 of them — the cap, not cost, was the binding
+    # constraint: that run spent $0.13 against a $2.00 ceiling, 15x headroom. The
+    # newly-multi-region contract source got 9 of the 50 slots despite being the
+    # highest-quality feed. The pre-draft contact gate means an uncontactable lead
+    # costs a regex and a cached DNS lookup, not an Opus call, so a higher cap mostly
+    # buys *reach* rather than spend; the $2.00 cap still backstops it.
+    max_leads_per_run: int = 200
     # Skip research+drafting for leads with no deliverable contact when the goal is
     # auto-email. 18 of 25 drafted proposals were thrown away at the contact step
     # after being paid for at Opus prices; checking first costs a regex + a cached
@@ -92,7 +99,18 @@ class Settings(BaseSettings):
     # (B2B legitimate interest), are rate-limited, deduped, and carry an opt-out.
     auto_email: bool = False        # master gate — nothing sends unless this is True AND SMTP is set
     max_emails_per_day: int = 20    # cap (reply quality + domain reputation + legality); keep sane to protect deliverability
-    outreach_min_fit: int = 80      # only email strong-fit leads
+    # Only email strong-fit leads — but a bar nothing clears sends nothing, and this
+    # one had **never been cleared once**. Measured maxima across live runs:
+    # 72 (31033943812), 78 (30988060139), 52 (30909649401). Every run that queued a
+    # draft then skipped the send as ``low_fit``, so the system reported "success"
+    # while the outreach channel was closed by a constant. That is this project's
+    # signature defect (see the gates-must-not-fight-the-product pattern in the
+    # README): a check that cannot pass for the reason it exists.
+    #
+    # 70 aligns it with ``min_fit_score``: a lead good enough to draft is good enough
+    # to email. Deliberately NOT lower — the point of the gate is to protect sender
+    # reputation, so it must still exclude the p50 (28) and p90 (58) bulk.
+    outreach_min_fit: int = 70
     opt_out_mailbox: str = ""       # where "unsubscribe" replies go (defaults to owner_email)
 
     # --- auto-reply (autonomous handling of prospect replies) ---
