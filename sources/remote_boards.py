@@ -44,6 +44,24 @@ class RemoteBoardsSource(LeadSource):
         self.remoteok_url = remoteok_url
         self.wwr_rss_url = wwr_rss_url
         self.remotive_url = remotive_url
+        #: Last transport/HTTP failure, or None if every board succeeded. Read by the
+        #: funnel report so "the API rejected us" is not reported as "no jobs matched":
+        #: a swallowed 500 and a genuinely empty market both returned [] and both
+        #: surfaced as ``dead: fetched nothing``, which names the wrong lever — one
+        #: needs a code fix, the other needs different queries.
+        #:
+        #: This source is three independent boards behind one name, so the message is
+        #: PREFIXED with the board that failed and failures accumulate rather than
+        #: overwrite. A bare last-writer-wins string would report "RemoteOK is down"
+        #: when RemoteOK was fine and Remotive was down, and would hide two outages
+        #: behind the third. Two of three failing is also not the same event as all
+        #: three: the count is what says whether to look at the network or the code.
+        self.last_error: str | None = None
+        self._errors: list[str] = []
+
+    def _note_error(self, board: str, exc: Exception) -> None:
+        self._errors.append(f"{board}: {type(exc).__name__}: {exc}")
+        self.last_error = "; ".join(self._errors)
 
     # --- RemoteOK (JSON) ---------------------------------------------------
     def _fetch_remoteok(self, limit: int) -> list[Lead]:
@@ -58,6 +76,7 @@ class RemoteBoardsSource(LeadSource):
             data = resp.json()
         except Exception as exc:
             logger.warning("remote_boards: RemoteOK fetch failed: %s", exc)
+            self._note_error("RemoteOK", exc)
             return leads
 
         if not isinstance(data, list):
@@ -101,6 +120,7 @@ class RemoteBoardsSource(LeadSource):
             parsed = feedparser.parse(self.wwr_rss_url)
         except Exception as exc:  # pragma: no cover
             logger.warning("remote_boards: WWR parse failed: %s", exc)
+            self._note_error("WeWorkRemotely", exc)
             return leads
         for entry in getattr(parsed, "entries", []) or []:
             if len(leads) >= limit:
@@ -149,6 +169,7 @@ class RemoteBoardsSource(LeadSource):
             data = resp.json()
         except Exception as exc:
             logger.warning("remote_boards: Remotive fetch failed: %s", exc)
+            self._note_error("Remotive", exc)
             return leads
 
         jobs = data.get("jobs", []) if isinstance(data, dict) else []
@@ -189,6 +210,11 @@ class RemoteBoardsSource(LeadSource):
         return leads
 
     def fetch(self, limit: int = 50) -> list[Lead]:
+        # Per-fetch, so a board that recovers stops reporting a stale error. Without
+        # this reset the source is permanently "broken" after one bad run, which is
+        # the mirror of the bug last_error was added to fix.
+        self.last_error = None
+        self._errors = []
         leads: list[Lead] = []
         leads.extend(self._fetch_remoteok(limit))
         remaining = limit - len(leads)
