@@ -114,7 +114,12 @@ def _maybe_email_lead(
     return "sent" if sent else "send_failed"
 
 
-def _fit_summary(scores: list[int], threshold: int, unscored: int = 0) -> dict:
+def _fit_summary(
+    scores: list[int],
+    threshold: int,
+    unscored: int = 0,
+    budget_exhausted: bool = False,
+) -> dict:
     """Summarise the run's fit-score distribution and name the likely bottleneck.
 
     ``dropped: 34`` on its own is unactionable. The two causes need opposite fixes:
@@ -132,8 +137,27 @@ def _fit_summary(scores: list[int], threshold: int, unscored: int = 0) -> dict:
     for this ICP, the one carrying an actual day rate — contributed zero scores to
     three consecutive runs. A confident verdict computed over a censored sample sends
     you to fix targeting that is already correct, which is worse than no verdict.
+
+    ``budget_exhausted`` is the run-level fact that the spend cap stopped the loop. It
+    is threaded in because this function is the ONLY place that names a bottleneck, and
+    without it a run that died on money reported ``bottleneck: none — leads are clearing
+    the bar``: literally true about the scores (41 of 123 cleared 70) and false about the
+    run, which stopped at $2.0042 against its cap with a lead it never reached. "none"
+    tells the reader there is nothing to unblock, on the one run where the binding
+    constraint was known and fixable in one setting.
     """
     if not scores:
+        # Nothing was scored AND the cap was hit: say which, because "no leads scored"
+        # reads as a sourcing/gating problem when the cause was spend.
+        if budget_exhausted:
+            return {
+                "n": 0,
+                "unscored": unscored,
+                "bottleneck": (
+                    "budget: the run stopped on its spend cap before any lead was "
+                    "scored — raise max_usd_per_run or cut per-lead spend"
+                ),
+            }
         return {"n": 0, "unscored": unscored, "bottleneck": "no leads scored"}
 
     ordered = sorted(scores)
@@ -145,7 +169,28 @@ def _fit_summary(scores: list[int], threshold: int, unscored: int = 0) -> dict:
     passed = sum(1 for s in ordered if s >= threshold)
     near_miss = sum(1 for s in ordered if threshold - 10 <= s < threshold)
 
-    if passed:
+    if budget_exhausted:
+        # PRECEDENCE, deliberately: budget outranks every distribution verdict below —
+        # including the censored-sample branch — because all four of those describe the
+        # SHAPE of the scores, and on a truncated run that shape is a prefix of what the
+        # money bought, not a sample of the lead mix. None of them can name the thing
+        # that actually stopped the run. It is placed ahead of ``passed`` because that is
+        # the exact line this fixes: run 31172835060 scored 41/123 over the bar and
+        # reported "none — leads are clearing the bar" after stopping at $2.0042 on its
+        # cap with one new lead it never reached. "none" tells the reader there is
+        # nothing to unblock, on the one run whose blocker was known and was one setting.
+        #
+        # It does NOT trade specificity away: this message carries the same
+        # scored-of-new counts the sample branch reports, says the same thing about the
+        # distribution not being evidence, and additionally names the lever. Anything
+        # less specific would be a regression on the censored-sample fix above.
+        bottleneck = (
+            f"budget: the run stopped on its spend cap after scoring {n} of "
+            f"{n + unscored} new leads, so this distribution is a prefix, not a sample "
+            f"({passed}/{n} cleared {threshold} before the stop). Raise max_usd_per_run "
+            "or cut per-lead spend before reading targeting from it."
+        )
+    elif passed:
         bottleneck = "none — leads are clearing the bar"
     elif near_miss >= max(2, n // 5):
         bottleneck = (
@@ -275,8 +320,37 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             )
         elif not entry.get("passed"):
             entry["verdict"] = f"off-ICP: best score {entry['max']} < {threshold}"
+        elif not entry["queued"]:
+            # Clearing the fit bar is NOT output. A lead can score 82 and still never be
+            # queued: no deliverable contact, the per-day proposal cap, or the run hitting
+            # its spend cap mid-loop. ``passed`` was being printed as the "productive"
+            # number, so run 31172835060 read ``productive: 8 cleared 70`` for
+            # remote_boards — 22 new leads, 1 contactable, **0 queued** — in text
+            # identical to hn_hiring, which queued all 8 of its 8. Two sources, one
+            # verdict, opposite correct responses (widen the winner vs. find out why the
+            # other delivers nothing). This is the mirror of the email-blocked fix above:
+            # that one under-credited a good source, this one over-credited a barren one.
+            # Both are the same defect — a verdict asserting an outcome the counts don't
+            # show — and over-crediting is the worse direction, because a source reported
+            # productive is never investigated.
+            #
+            # The cause is a run-level fact this function cannot see, so name the measured
+            # evidence and point at the candidates rather than picking one.
+            entry["verdict"] = (
+                f"no-output: 0 queued, though {entry['passed']} of {entry['scored']} "
+                f"scores cleared {threshold} ({entry['contactable']}/{entry['new']} "
+                "contactable) — clearing the bar is not output; check contacts, "
+                "max_proposals_per_day and the run budget"
+            )
         else:
-            entry["verdict"] = f"productive: {entry['passed']} cleared {threshold}"
+            # Every number is labelled with what it measures, and the OUTPUT count leads.
+            # "productive: 8 cleared 70" put a scores-above-bar count where a reader takes
+            # the headline number to be leads delivered; here 8-queued and 8-cleared can
+            # no longer be read as each other even when they happen to be equal.
+            entry["verdict"] = (
+                f"productive: {entry['queued']} queued, "
+                f"{entry['passed']} of {entry['scored']} scores cleared {threshold}"
+            )
         out[name] = entry
     return out
 
@@ -555,8 +629,15 @@ def run_pipeline(
     # (budget exhausted mid-run, a graph error, a future pre-gate). Counting it at each
     # skip site would mean a new skip path silently omits itself, which is how the
     # censored-sample bug got in.
+    # ``budget_exhausted`` is passed, not re-derived: the bottleneck line is the only
+    # place the run says what stopped it, and it read "none — leads are clearing the bar"
+    # on a run that broke off against its spend cap. The flag was already in ``stats``
+    # two lines up; the summary just could not see it.
     stats["fit"] = _fit_summary(
-        fit_scores, settings.min_fit_score, unscored=max(0, new - len(fit_scores))
+        fit_scores,
+        settings.min_fit_score,
+        unscored=max(0, new - len(fit_scores)),
+        budget_exhausted=budget_exhausted,
     )
     stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
 

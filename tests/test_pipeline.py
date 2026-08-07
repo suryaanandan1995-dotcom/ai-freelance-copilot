@@ -53,6 +53,19 @@ def _lead(i: int) -> Lead:
     )
 
 
+def _contactable_lead(i: int) -> Lead:
+    """A lead carrying a public address, so ``contactable`` is non-zero.
+
+    ``_lead`` publishes no email, which makes its source read ``email-blocked`` whatever
+    else happens. The verdicts about output vs. scores only become visible once contact
+    is not the binding constraint. DNS is off suite-wide (tests/conftest.py), so
+    ``acme.io`` is deliverable here.
+    """
+    lead = _lead(i)
+    lead.description = f"{lead.description} Email jobs@acme.io to apply."
+    return lead
+
+
 class FakeSource:
     """In-memory source returning a fixed list of leads."""
 
@@ -575,6 +588,290 @@ def test_run_pipeline_counts_fetched_before_the_cap_truncates(temp_db, monkeypat
     # full, so prefix-truncation showed it fetching nothing at all.
     assert "dead" not in by_source["jobicy"]["verdict"]
     assert by_source["jobicy"]["considered"] >= 1, "the cap must sample it"
+
+
+# --------------------------------------------------------------------------- #
+# "productive" must mean output, not scores above the bar
+# --------------------------------------------------------------------------- #
+def test_a_source_that_queued_nothing_is_not_reported_as_productive():
+    """Run 31172835060 called a source that delivered nothing 'productive'.
+
+    ``remote_boards``: 22 new leads, **1** contactable, **0** queued — reported
+    ``productive: 8 cleared 70``, character-for-character the same line as ``hn_hiring``,
+    which queued all 8 of its 8. ``passed`` (scores >= threshold) was being printed where
+    a reader takes the headline number to be leads delivered. A lead can score 82 and
+    still never queue: no deliverable address, the per-day proposal cap, or the run
+    hitting its spend cap mid-loop.
+
+    This is the mirror of the ``email-blocked`` fix — that one under-credited a good
+    source, this over-credits a barren one — and over-crediting is the worse direction,
+    because a source reported productive is never investigated.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "remote_boards": {
+                "fetched": 22, "considered": 22, "new": 22, "contactable": 1,
+                "queued": 0, "scores": [52, 61, 71, 74, 76, 78, 80, 81, 82, 82],
+            }
+        },
+        threshold=70,
+    )
+    verdict = out["remote_boards"]["verdict"]
+    assert "productive" not in verdict
+    assert "no-output" in verdict
+    # The counts must stay in the line: dropping them would swap a wrong verdict for an
+    # unactionable one. And each has to say what it measures.
+    assert "0 queued" in verdict
+    assert "cleared 70" in verdict
+    assert "1/22 contactable" in verdict
+    # Name the candidate causes; this function cannot see which run-level cap bound.
+    assert "max_proposals_per_day" in verdict
+
+
+def test_a_source_that_actually_queued_leads_still_reads_as_productive():
+    """The other direction. `hn_hiring` queued 8 of 8 and must not be downgraded.
+
+    A check that fired on both outcomes would distinguish nothing, which is the defect
+    being fixed, so the healthy case is pinned here as tightly as the broken one.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "hn_hiring": {
+                "fetched": 26, "considered": 26, "new": 26, "contactable": 26,
+                "queued": 8, "scores": [30, 41, 48, 55, 72, 78, 84, 88, 91, 93],
+            }
+        },
+        threshold=70,
+    )
+    verdict = out["hn_hiring"]["verdict"]
+    assert verdict.startswith("productive")
+    assert "no-output" not in verdict
+    # Output leads the line, and the two counts can no longer be read as each other.
+    assert "8 queued" in verdict
+    assert "6 of 10 scores cleared 70" in verdict
+
+
+def test_the_two_verdicts_for_the_measured_run_are_not_the_same_string():
+    """The actual defect: identical text for a source that produced 8 and one that
+    produced 0. The digest is the only thing read, so identical text is the bug."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "hn_hiring": {
+                "fetched": 26, "considered": 26, "new": 26, "contactable": 26,
+                "queued": 8, "scores": [48] * 18 + [93] * 8,
+            },
+            "remote_boards": {
+                "fetched": 22, "considered": 22, "new": 22, "contactable": 1,
+                "queued": 0, "scores": [52] * 14 + [82] * 8,
+            },
+        },
+        threshold=70,
+    )
+    assert out["hn_hiring"]["passed"] == out["remote_boards"]["passed"] == 8
+    assert out["hn_hiring"]["verdict"] != out["remote_boards"]["verdict"]
+
+
+def test_a_source_with_one_queued_lead_is_productive_not_no_output():
+    """The boundary. `queued == 1` is output; only zero is not."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "jobicy": {
+                "fetched": 5, "considered": 5, "new": 5, "contactable": 2,
+                "queued": 1, "scores": [40, 75],
+            }
+        },
+        threshold=70,
+    )
+    assert out["jobicy"]["verdict"].startswith("productive")
+
+
+def test_the_no_output_verdict_does_not_shadow_off_icp_or_email_blocked():
+    """`no-output` is checked last, so the more specific diagnoses still win.
+
+    A source with 0 queued and no contacts is email-blocked (a routing note); one with 0
+    queued and no passing score is off-ICP (a targeting fix). Replacing either with the
+    generic "check three caps" line would lose the reason — the same class of regression
+    as the censored-sample branch guards against in `_fit_summary`.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {
+            "adzuna": {
+                "fetched": 25, "considered": 25, "new": 25, "contactable": 0,
+                "queued": 0, "scores": [72, 88, 97],
+            },
+            "weworkremotely": {
+                "fetched": 9, "considered": 9, "new": 9, "contactable": 9,
+                "queued": 0, "scores": [10, 22, 31],
+            },
+        },
+        threshold=70,
+    )
+    assert "email-blocked" in out["adzuna"]["verdict"]
+    assert "no-output" not in out["adzuna"]["verdict"]
+    assert "off-ICP" in out["weworkremotely"]["verdict"]
+    assert "no-output" not in out["weworkremotely"]["verdict"]
+
+
+def test_run_pipeline_reports_no_output_when_the_proposal_cap_blocks_queuing(
+    temp_db, monkeypatch
+):
+    """End-to-end: high-scoring leads, zero queued, and the verdict must say so.
+
+    With `max_proposals_per_day = 0` every lead scores 90 (clearing the bar) and none is
+    ever persisted. Before the fix this source read `productive: N cleared 70` on a run
+    that delivered nothing at all.
+    """
+    import config
+    from pipeline import run_pipeline
+
+    real_get = config.get_settings
+
+    def capped():
+        s = real_get()
+        s.max_proposals_per_day = 0
+        return s
+
+    monkeypatch.setattr("pipeline.get_settings", capped)
+
+    stats = run_pipeline(
+        sources=[FakeSource([_contactable_lead(1), _contactable_lead(2)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    assert stats["queued"] == 0, "precondition: nothing was delivered"
+    row = stats["by_source"]["upwork_rss"]
+    assert row["contactable"] >= 1, "precondition: contact is not the blocker here"
+    assert row["passed"] >= 1, "precondition: leads did clear the fit bar"
+    assert "productive" not in row["verdict"]
+    assert "no-output" in row["verdict"]
+
+
+# --------------------------------------------------------------------------- #
+# a run killed by its spend cap has a bottleneck, and it is not "none"
+# --------------------------------------------------------------------------- #
+def test_a_budget_truncated_run_names_budget_as_the_bottleneck():
+    """Run 31172835060 stopped at $2.0042 on its cap and reported no bottleneck.
+
+    `budget_exhausted: True`, `unscored: 1` — the lead it never reached — yet the digest
+    read `bottleneck: none — leads are clearing the bar`. True about the scores, false
+    about the run: the binding constraint was money, and this line is the only place that
+    could have said so. "none" tells the reader there is nothing to unblock.
+    """
+    from pipeline import _fit_summary
+
+    s = _fit_summary([2, 42, 42, 82, 97], threshold=70, unscored=1, budget_exhausted=True)
+    assert "none" not in s["bottleneck"]
+    assert "budget" in s["bottleneck"]
+    # Name the lever, not just the symptom.
+    assert "max_usd_per_run" in s["bottleneck"]
+    # The scores are still reported — the verdict changes, the measurements don't.
+    assert s["passed"] == 2
+
+
+def test_a_run_that_finished_inside_its_budget_still_reports_no_bottleneck():
+    """The other direction: 'budget' must not become the answer to every run.
+
+    Identical scores, cap never hit -> 'none' is the honest verdict and must survive.
+    """
+    from pipeline import _fit_summary
+
+    s = _fit_summary([2, 42, 42, 82, 97], threshold=70, unscored=1, budget_exhausted=False)
+    assert "none" in s["bottleneck"]
+    assert "budget" not in s["bottleneck"]
+
+
+def test_the_budget_bottleneck_outranks_the_distribution_verdicts_it_cannot_trust():
+    """Precedence, asserted: a truncated distribution is a prefix, not a sample.
+
+    All four distribution verdicts describe the SHAPE of the scores, and on a run that
+    broke off mid-loop that shape is whatever the money bought. So budget wins over
+    'threshold' and 'off-ICP' — but it must not lose the specificity of the
+    censored-sample branch it also outranks: the counts and the "not a sample" warning
+    stay in the line, plus the lever the sample branch cannot name.
+    """
+    from pipeline import _fit_summary
+
+    near = _fit_summary([62, 64, 65, 67, 68, 69], threshold=70, budget_exhausted=True)
+    assert "budget" in near["bottleneck"]
+    assert "min_fit_score" not in near["bottleneck"]
+
+    censored = _fit_summary([5, 8, 12], threshold=70, unscored=40, budget_exhausted=True)
+    assert "budget" in censored["bottleneck"]
+    assert "off-ICP" not in censored["bottleneck"]
+    # No loss of information relative to the sample verdict it replaced.
+    assert "3 of 43" in censored["bottleneck"]
+    assert "not a sample" in censored["bottleneck"]
+    assert "max_usd_per_run" in censored["bottleneck"]
+
+    # Same inputs without truncation: the specific verdicts are untouched.
+    assert "min_fit_score" in _fit_summary(
+        [62, 64, 65, 67, 68, 69], threshold=70
+    )["bottleneck"]
+    assert "sample" in _fit_summary(
+        [5, 8, 12], threshold=70, unscored=40
+    )["bottleneck"]
+
+
+def test_a_budget_kill_before_any_score_says_budget_not_no_leads_scored():
+    """`no leads scored` reads as a sourcing or gating problem. Here it was spend."""
+    from pipeline import _fit_summary
+
+    s = _fit_summary([], threshold=70, unscored=12, budget_exhausted=True)
+    assert "budget" in s["bottleneck"]
+    assert _fit_summary([], threshold=70, unscored=12)["bottleneck"] == "no leads scored"
+
+
+def test_run_pipeline_threads_budget_exhaustion_into_the_bottleneck(temp_db, monkeypatch):
+    """End-to-end: the flag exists in `stats` but `_fit_summary` could not see it.
+
+    A pre-exhausted tracker stops the run on its first metered call, exactly as the live
+    run did at its cap.
+    """
+    import pipeline as pipeline_mod
+    from costs import CostTracker
+    from pipeline import run_pipeline
+
+    over = CostTracker(budget_usd=2.0)
+    over.record("claude-opus-4-8", 0, 1_000_000)
+    monkeypatch.setattr(pipeline_mod, "CostTracker", lambda budget_usd=None: over)
+
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(1), _lead(2)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    assert stats["budget_exhausted"] is True
+    assert "budget" in stats["fit"]["bottleneck"]
+    assert "none" not in stats["fit"]["bottleneck"]
+
+
+def test_a_healthy_run_end_to_end_still_reports_no_bottleneck(temp_db):
+    """The healthy end-to-end case: inside budget, leads clearing the bar, 'none'."""
+    from pipeline import run_pipeline
+
+    stats = run_pipeline(
+        sources=[FakeSource([_contactable_lead(1), _contactable_lead(2)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    assert stats["budget_exhausted"] is False
+    assert "none" in stats["fit"]["bottleneck"]
+    assert "budget" not in stats["fit"]["bottleneck"]
+    # ...and its source genuinely produced, so it must read productive.
+    assert stats["by_source"]["upwork_rss"]["verdict"].startswith("productive")
 
 
 def test_fit_summary_percentiles_and_bounds():
