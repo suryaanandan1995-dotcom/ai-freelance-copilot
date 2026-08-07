@@ -220,6 +220,12 @@ class Settings(BaseSettings):
     owner_linkedin: str = "https://www.linkedin.com/in/surya-devsecops/"
     owner_site: str = "https://suryaanandan1995-dotcom.github.io"
     owner_calendly: str = "https://cal.com/surya-devsecops/15min"
+    # GitHub account the portfolio repos live under. Used to build a REAL per-project
+    # URL for the project a pitch cites: the prompt demands "a named project with no
+    # link is an unverifiable claim", but the only link it was given was the portfolio
+    # root, so the model supplied its own — and invented a repo that 404s. See
+    # outreach.pitch._project_links.
+    owner_github: str = "https://github.com/suryaanandan1995-dotcom"
 
 
 def get_settings() -> Settings:
