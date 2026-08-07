@@ -195,6 +195,136 @@ _HIRING_CUE_RE = re.compile(
 #: footer 2,000 chars up the page cannot lend its cue to an unrelated address.
 _CUE_WINDOW = 160
 
+# --- the surrounding prose, not the local-part -----------------------------------
+#
+# :data:`_NON_HIRING_TOKENS` asks "does this mailbox *look* institutional", and that
+# question has a ceiling: it cannot see what the sentence containing the address says
+# the address is *for*. Measured across ~430 live listings, of ~31 addresses the gate
+# ACCEPTED only 6 were genuine hiring contacts and just 2 of those sat on engineering
+# roles. The other ~25 were accommodations desks, fraud-report inboxes and legal/ATS
+# routing. So the gate's real defect was the opposite of the one it was built for: it
+# is too LOOSE, not too strict.
+#
+# Worse, :func:`_is_hiring_local` returning True short-circuits every other check, so
+# a hiring-flavoured local-part is *guaranteed* to pass no matter what the prose says.
+# Three verbatim examples from the fetch on 2026-08-07:
+#
+#   recruiting@ppg.com          "If you need an adjustment due to a disability,
+#                                please email recruiting@ppg.com."
+#   applicationassistance@      "Alternative methods of applying ... for individuals
+#     sailpoint.com              unable to submit an application because of a
+#                                disability. Contact <addr> ... NOTE: Any unsolicited
+#                                resumes sent by candidates or agencies to this email"
+#   isamoylova@mirantis.com     "You also have the right to appeal any decisions made
+#                                by ADMT by sending your request to <addr>"
+#
+# The Mirantis one is why this has to be a prose check and not a longer reject list:
+# the local-part is an ordinary human name, so no amount of local-part cleverness can
+# ever catch it. Only the sentence gives it away.
+#
+# **Why phrases and not topic words.** The tempting implementation matches
+# ``disability``/``privacy``/``fraud`` near the address. That would be the over-strict
+# mirror this module's header warns about, and it would fire almost everywhere: every
+# US job ad carries an EEO footer reading "without regard to race, color, religion,
+# sex, ... disability status, protected veteran status", so a bare ``disability``
+# keyword would disqualify the legitimate ``careers@`` address of most listings and
+# make the market look empty. What actually marks an address as off-limits is prose
+# that *routes you to it for a non-hiring purpose* — "if you require an accommodation,
+# contact X", "report it to X". So every pattern below contains a routing verb or an
+# explicit prohibition, never a bare subject word.
+#
+# The patterns are split into two tiers because they are not equally decisive.
+# :data:`_HARD_BLOCK_RE` names the address's purpose or names the address itself
+# ("unsolicited resumes sent to this email"), and nothing can override it.
+# :data:`_SOFT_BLOCK_RE` is a *general* prohibition aimed at somebody else — "no
+# agencies" is addressed to recruitment firms, and a listing can say it in its footer
+# while still printing "Apply: careers@…" three words from the address. Blocking those
+# outright would be over-strict in precisely our target market: UK/EU contract ads say
+# "no agencies" constantly, so a hard block there would cost real leads for a warning
+# that was never aimed at a freelancer applying directly.
+_HARD_BLOCK_RE = re.compile(
+    # accommodations / accessibility desks — the largest measured group (14 of ~31)
+    r"(?:need|require|request(?:ing)?|needing)\s+(?:an?\s+)?"
+    r"(?:reasonable\s+)?(?:accommodation|accomodation|adjustment|assistance|aid)"
+    r"|reasonable\s+accommodation"
+    r"|(?:due\s+to|because\s+of|owing\s+to|on\s+account\s+of)\s+(?:a\s+)?disabilit"
+    r"|unable\s+to\s+(?:submit|complete|apply|access|use)"
+    r"|alternative\s+(?:method|means|format)"
+    r"|assistance\s+(?:with|in)\s+(?:the\s+)?(?:applic|complet)"
+    r"|accessible\s+format"
+    # anti-recruitment-fraud warnings. The address in these is where you report a
+    # scam, and 4 measured domains appeared ONLY inside such a warning.
+    r"|fraudulent|fraud(?:ulent)?\s+(?:job|offer|recruit|email|activit)"
+    r"|(?:job|recruitment|hiring|employment)\s+scam"
+    r"|scam(?:s|mers?)?\b"
+    r"|phishing|impersonat"
+    r"|we\s+(?:will\s+)?(?:never|do\s+not|don'?t)\s+(?:ask|request|require|charge)"
+    r"|report\s+(?:it|this|them|any\s+such|suspicious)"
+    r"|verify\s+the\s+(?:legitimacy|authenticity)"
+    # "unsolicited resumes sent to this email will not be honoured" — an explicit
+    # prohibition attached to THIS address, measured verbatim on SailPoint.
+    r"|unsolicited\s+(?:resum|r[eé]sum|cv|applicat|candidat)"
+    # data-protection / ADMT / privacy routing (the Mirantis case)
+    r"|(?:personal|candidate)\s+data"
+    r"|data\s+protection\s+(?:law|regulation|officer|request)"
+    r"|right\s+to\s+(?:appeal|object|erasure|access|be\s+forgotten)"
+    r"|automated\s+decision"
+    r"|\bADMT\b"
+    r"|opt(?:ing)?[-\s]?out"
+    r"|(?:exercise|submit)\s+your\s+(?:rights|request)"
+    # employee-only / internal routing
+    r"|current\s+employees\s+(?:should|must|please)"
+    r"|internal\s+(?:applicants?|candidates?|transfer)",
+    re.IGNORECASE,
+)
+
+#: General prohibitions aimed at agencies rather than at this address. Blocking only
+#: when no hiring cue sits closer — see :func:`_is_do_not_contact`.
+_SOFT_BLOCK_RE = re.compile(
+    r"no\s+agenc(?:y|ies)"
+    r"|agenc(?:y|ies)\s+(?:need\s+not|please\s+do\s+not|will\s+not|are\s+not)"
+    r"|(?:staffing|recruiting|recruitment|search)\s+(?:agenc|firm|vendor|partner)"
+    r"|third[-\s]?part(?:y|ies)\s+(?:agenc|recruit|vendor)"
+    r"|direct\s+applicants?\s+only",
+    re.IGNORECASE,
+)
+
+#: HTML entities that survive :func:`~sources._text.strip_html` on some feeds and
+#: would otherwise split a phrase the classifier is trying to match. Measured:
+#: "please email&nbsp;recruiting@ppg.com".
+_ENTITY_RE = re.compile(r"&(?:nbsp|amp|#\d{1,4}|#x[0-9a-fA-F]{1,4});")
+
+#: Prose window for :data:`_DO_NOT_CONTACT_RE`. Wider *before* the address than
+#: after, because the disqualifying sentence overwhelmingly precedes it ("If you
+#: require an accommodation, contact <addr>"), but not unbounded: the whole reason
+#: this is a window and not a whole-document scan is that a fraud warning in a footer
+#: must not disqualify a hiring address 3,000 chars above it. The trailing side still
+#: has to be real, because "…to this email" prohibitions come after (SailPoint).
+_BLOCK_WINDOW_BEFORE = 220
+_BLOCK_WINDOW_AFTER = 120
+
+
+def _is_do_not_contact(text: str, start: int, end: int) -> bool:
+    """True if the prose around an address routes it to a non-hiring purpose.
+
+    Overrides :func:`_is_hiring_local`, deliberately: ``recruiting@ppg.com`` is a
+    hiring-stemmed local-part published as a disability-adjustment desk, and the
+    local-part winning outright is the specific line that let ~25 of ~31 accepted
+    addresses through.
+
+    A hard block is unconditional. A soft block (an agency prohibition, which is
+    aimed at recruitment firms and not at us) yields to an explicit hiring cue in the
+    same window — "Apply: careers@acme.com. No agencies." is an apply address with a
+    footer, not an agency inbox.
+    """
+    raw = text[max(0, start - _BLOCK_WINDOW_BEFORE) : end + _BLOCK_WINDOW_AFTER]
+    window = _ENTITY_RE.sub(" ", raw)
+    if _HARD_BLOCK_RE.search(window):
+        return True
+    if _SOFT_BLOCK_RE.search(window):
+        return not _HIRING_CUE_RE.search(window)
+    return False
+
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z]+")
 
 #: Local-parts that are a **template for** an address rather than an address.
@@ -349,6 +479,11 @@ def _best_email_in(text: str) -> str | None:
     2. otherwise, prose near the address invites contact ("email", "send your CV");
     3. otherwise, first found — the pre-existing behaviour, and still exactly what
        happens when there is only one candidate.
+
+    Addresses whose surrounding prose disqualifies them are **dropped, not demoted**
+    (see :func:`_is_do_not_contact`). Demotion would be useless in the measured cases:
+    an accommodations desk is usually the *only* address in the listing, so ranking it
+    last still selects it. "No contact" is the correct answer for those leads.
     """
     # Scan the raw text first (catches "email: x@y.com", "contact: x@y.com"), then a
     # de-obfuscated copy ("name [at] domain [dot] com").
@@ -362,6 +497,13 @@ def _best_email_in(text: str) -> str | None:
         for order, match in enumerate(_EMAIL_RE.finditer(variant)):
             email = match.group(0).lower().strip(".,;:<>()[]\"'")
             if not _is_good_email(email):
+                continue
+            if _is_do_not_contact(variant, match.start(), match.end()):
+                # The prose says this mailbox is for accommodations / fraud reports /
+                # data requests / agencies. Checked here rather than in
+                # _is_good_email because it needs the address's POSITION in the text,
+                # which is the only thing that distinguishes "the careers@ line" from
+                # "the careers@ in the fraud warning".
                 continue
             local, _, _domain = email.partition("@")
             rank = 2 if _is_hiring_local(local) else _cue_score(
