@@ -8,6 +8,26 @@ from __future__ import annotations
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+#: SMTP relays that only SEND. They expose no IMAP server, so an IMAP host cannot be
+#: derived from them — replies to mail sent through a relay arrive in the mailbox that
+#: owns the From address, which only the operator knows. See
+#: :meth:`Settings.resolved_imap_host`.
+_SEND_ONLY_SMTP_HOSTS = frozenset(
+    {
+        "smtp.sendgrid.net",
+        "smtp.mailgun.org",
+        "smtp.eu.mailgun.org",
+        "smtp-relay.brevo.com",
+        "smtp.brevo.com",
+        "smtp.sendinblue.com",
+        "smtp.resend.com",
+        "smtp.postmarkapp.com",
+        "email-smtp.us-east-1.amazonaws.com",
+        "smtp.mailersend.net",
+        "smtp.sparkpostmail.com",
+    }
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="COPILOT_", env_file=".env", extra="ignore")
@@ -171,7 +191,14 @@ class Settings(BaseSettings):
     # forever — indistinguishable from a pitch nobody wants. Detection is safe to leave
     # on because it sends nothing; it only needs IMAP credentials.
     reply_detection: bool = True
-    imap_host: str = "imap.gmail.com"
+    # Blank means "derive it from smtp_host" — see :meth:`resolved_imap_host`. It is
+    # deliberately NOT defaulted to a concrete provider: this field used to read
+    # ``imap.gmail.com`` while the login credentials come from the *SMTP* settings, so
+    # any non-Gmail SMTP provider silently decoupled reading from sending. That failure
+    # is invisible (``fetch_replies`` swallows IMAP errors and returns ``[]``), and its
+    # consequence is nudging people who already replied. A default that has to match a
+    # secret nobody re-checks is a default that will eventually be wrong.
+    imap_host: str = ""
     imap_port: int = 993
     max_replies_per_thread: int = 6   # safety stop against reply loops
     standard_rate: str = ""           # optional; blank = always defer pricing to the call
@@ -226,6 +253,52 @@ class Settings(BaseSettings):
     # root, so the model supplied its own — and invented a repo that 404s. See
     # outreach.pitch._project_links.
     owner_github: str = "https://github.com/suryaanandan1995-dotcom"
+
+    def resolved_imap_host(self) -> str:
+        """The IMAP host to read replies from, derived from ``smtp_host`` when unset.
+
+        IMAP logs in with the SMTP username and password, so the two hosts must belong
+        to the same provider. Keeping ``imap_host`` as an independent setting with a
+        Gmail default meant the pair could disagree with nothing to notice: point
+        ``COPILOT_SMTP_HOST`` at any other provider and reads go to Gmail with
+        credentials it will refuse, ``fetch_replies`` swallows the error and returns
+        ``[]``, and every prospect who answered keeps getting follow-up nudges.
+
+        Deriving beats defaulting because the transform is mechanical for every
+        provider that offers both protocols: the submission host differs from the mail
+        host only in the leading ``smtp`` label (``smtp.gmail.com`` /
+        ``imap.gmail.com``, ``smtp.office365.com`` / ``outlook.office365.com`` is the
+        one exception worth naming, ``smtp.zoho.eu`` / ``imap.zoho.eu``).
+
+        An explicit ``imap_host`` always wins, so a provider that breaks the pattern
+        stays configurable. Returns ``""`` when SMTP is unconfigured — the caller
+        treats that as "not set up", which is correct, rather than as a host to try.
+        """
+        explicit = (self.imap_host or "").strip()
+        if explicit:
+            return explicit
+        host = (self.smtp_host or "").strip().lower()
+        if not host:
+            return ""
+        # Send-only relays have NO IMAP service, so there is no host to derive: mail
+        # sent through them is replied to in whatever mailbox the From address belongs
+        # to. Deriving "imap.sendgrid.net" would produce a nonexistent host and report
+        # a login failure, when the real instruction is "set COPILOT_IMAP_HOST to your
+        # own mailbox provider". Returning "" makes the checks say exactly that.
+        # Amazon SES is regional (email-smtp.<region>.amazonaws.com), so it is matched
+        # by shape rather than enumerated.
+        if host in _SEND_ONLY_SMTP_HOSTS or (
+            host.startswith("email-smtp.") and host.endswith(".amazonaws.com")
+        ):
+            return ""
+        # Office 365 is the one common provider whose IMAP host is not the SMTP host
+        # with the label swapped, so it is named rather than derived.
+        if host in {"smtp.office365.com", "smtp-mail.outlook.com"}:
+            return "outlook.office365.com"
+        labels = host.split(".")
+        if labels and labels[0] in {"smtp", "smtps", "mail", "send", "submission"}:
+            return ".".join(["imap"] + labels[1:])
+        return host
 
 
 def get_settings() -> Settings:

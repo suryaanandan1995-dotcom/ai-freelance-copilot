@@ -118,6 +118,84 @@ def _check_linkedin_token() -> dict:
         return {"name": "linkedin_token", "ok": False, "detail": f"token check error: {exc}"}
 
 
+def _check_imap_login(timeout: float = 20.0) -> dict:
+    """Actually log in to IMAP, so a broken reader is found before it costs anything.
+
+    The funnel check (``monitor.funnel.check_reply_detection_alive``) can only *infer*
+    a broken reader from a long enough silence, which needs 25 sends and still cannot
+    separate "credentials are wrong" from "nobody replied". This proves it directly:
+    IMAP either accepts the SMTP credentials or it does not, and that answer is
+    available today, at the cost of one login a day.
+
+    Worth checking on a schedule rather than trusting once, because the failure is
+    invisible in the place it happens — ``reply.inbox.fetch_replies`` degrades every
+    IMAP error to ``[]`` — and its consequence is active rudeness: nobody gets marked
+    replied, so follow-ups keep nudging prospects who already answered.
+
+    Reads nothing and sends nothing: connect, authenticate, log out.
+    """
+    try:
+        import imaplib
+
+        from config import get_settings
+
+        settings = get_settings()
+        if not (settings.smtp_user or "").strip() or not (settings.smtp_password or "").strip():
+            return {"name": "imap_login", "ok": True, "detail": "not configured (skipped)"}
+        host = settings.resolved_imap_host()
+        if not host:
+            # Credentials exist but no IMAP host could be resolved. With smtp_host set,
+            # that means a send-only relay (SendGrid/SES/Brevo/...) which has no IMAP
+            # service — so replies are landing in a mailbox nothing is reading. That is
+            # a real defect, not a skip, and it is silent by construction.
+            if (settings.smtp_host or "").strip():
+                return {
+                    "name": "imap_login",
+                    "ok": False,
+                    "detail": (
+                        f"smtp_host ({settings.smtp_host}) is a send-only relay with no "
+                        "IMAP service, and COPILOT_IMAP_HOST is unset — so replies are "
+                        "arriving in the mailbox behind the From address and nothing is "
+                        "reading it. Nobody gets marked replied, and follow-ups keep "
+                        "nudging prospects who already answered. Set COPILOT_IMAP_HOST "
+                        "to that mailbox's IMAP server."
+                    ),
+                }
+            return {"name": "imap_login", "ok": True, "detail": "no IMAP host (skipped)"}
+
+        derived = "derived from smtp_host" if not (settings.imap_host or "").strip() else "explicit"
+        conn = None
+        try:
+            conn = imaplib.IMAP4_SSL(host, settings.imap_port, timeout=timeout)
+            conn.login(settings.smtp_user, settings.smtp_password)
+            return {
+                "name": "imap_login",
+                "ok": True,
+                "detail": f"{host} accepted the SMTP credentials ({derived})",
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "name": "imap_login",
+                "ok": False,
+                "detail": (
+                    f"cannot log in to {host} ({derived}) with smtp_user/smtp_password: "
+                    f"{exc}. Replies are being read into a void: fetch_replies swallows "
+                    "this and returns [], so nobody is marked replied and follow-ups "
+                    "keep nudging prospects who already answered. Fix by setting "
+                    "COPILOT_IMAP_HOST to this provider's IMAP server, or (Gmail) by "
+                    "using an app password and enabling IMAP."
+                ),
+            }
+        finally:
+            if conn is not None:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        return {"name": "imap_login", "ok": False, "detail": f"IMAP check error: {exc}"}
+
+
 def format_report(result: dict) -> str:
     lines = [f"Health monitor — {'ALL OK' if result['ok'] else 'ISSUES FOUND'}", ""]
     for c in result.get("checks", []):
@@ -145,6 +223,7 @@ def run_healthcheck(alert: bool = True) -> dict:
     checks.append(_check_database())
     checks.append(_check_recent_runs())
     checks.append(_check_linkedin_token())
+    checks.append(_check_imap_login())
     # Output-based checks: a run that exits 0 while emailing nobody is a failure
     # this monitor previously could not see (24 such runs went unreported).
     try:

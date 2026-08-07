@@ -95,11 +95,19 @@ def fetch_replies(limit: int = 20) -> list[dict]:
         logger.info("fetch_replies: SMTP host/user not configured — no-op")
         return []
 
+    # Derived from smtp_host unless COPILOT_IMAP_HOST is set explicitly, because IMAP
+    # logs in with the SMTP credentials: a host from one provider and a password from
+    # another fails every time, and fails silently (see the except clause below).
+    imap_host = settings.resolved_imap_host()
+    if not imap_host:
+        logger.info("fetch_replies: no IMAP host and smtp_host is empty — no-op")
+        return []
+
     known = _known_senders()
     out: list[dict] = []
     conn: imaplib.IMAP4_SSL | None = None
     try:
-        conn = imaplib.IMAP4_SSL(settings.imap_host, settings.imap_port)
+        conn = imaplib.IMAP4_SSL(imap_host, settings.imap_port)
         conn.login(settings.smtp_user, settings.smtp_password)
         conn.select("INBOX")
         typ, data = conn.search(None, "UNSEEN")
@@ -132,7 +140,10 @@ def fetch_replies(limit: int = 20) -> list[dict]:
                 logger.warning("fetch_replies: skipped a message: %s", exc)
                 continue
     except Exception as exc:  # never raise into the runner
-        logger.warning("fetch_replies: IMAP error: %s", exc)
+        # Name the host. This branch is the *only* evidence that reading failed — the
+        # caller sees an empty list either way — and "which host did it even try" was
+        # the first thing needed to diagnose it.
+        logger.warning("fetch_replies: IMAP error against %s: %s", imap_host, exc)
         return out
     finally:
         if conn is not None:

@@ -31,11 +31,15 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COPILOT_ANTHROPIC_API_KEY: ${{ secrets.COPILOT_ANTHROPIC_API_KEY }}
-      # IMAP reuses SMTP_USER + SMTP_PASSWORD (a Gmail app password works for both);
-      # imap_host defaults to imap.gmail.com in config.py.
+      # IMAP reuses SMTP_USER + SMTP_PASSWORD (a Gmail app password works for both).
+      # The IMAP host is DERIVED from COPILOT_SMTP_HOST by resolved_imap_host(), so the
+      # two can no longer point at different providers — which used to fail silently,
+      # since fetch_replies swallows IMAP errors and returns [].
       COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
       COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
       COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+      # Optional override for a provider that breaks the naming pattern.
+      COPILOT_IMAP_HOST: ${{ secrets.COPILOT_IMAP_HOST }}
       COPILOT_AUTO_REPLY: "true"
       # REQUIRED for the per-thread cap + conversation log to persist across runs.
       COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
