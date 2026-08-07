@@ -173,3 +173,58 @@ def test_send_alert_never_raises(monkeypatch):
 
     monkeypatch.setattr(runlog.smtplib, "SMTP", boom)
     assert runlog.send_alert("s", "b") is False
+
+
+# --------------------------------------------------------------------------- #
+# INFO has to be visible, or the no-op branches are invisible
+# --------------------------------------------------------------------------- #
+def test_record_run_makes_info_logging_visible(capfd):
+    """Nothing called logging.basicConfig outside the MCP server, so production ran on
+    Python's last-resort handler: warnings printed, INFO was DISCARDED.
+
+    The INFO lines are the ones that announce that nothing happened — "reply detection
+    disabled — no-op", "auto_email disabled — not sending", "smtp_host empty",
+    "max_proposals_per_day reached". So a reply pass that never opened the inbox and
+    one that found an empty mailbox printed the identical "inbound: 0" and exited 0.
+    Six silent-skip branches were one un-set log level from being invisible.
+    """
+    import logging
+
+    import runlog
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    monkeypatched_ready = runlog._LOGGING_READY
+    try:
+        root.handlers = []
+        root.setLevel(logging.WARNING)
+        runlog._LOGGING_READY = False
+
+        def _job() -> dict:
+            logging.getLogger("reply.inbox").info("reply detection disabled — no-op")
+            return {}
+
+        runlog.record_run("test-info-visible", _job)
+        assert "reply detection disabled" in capfd.readouterr().err
+    finally:
+        root.handlers, runlog._LOGGING_READY = saved_handlers, monkeypatched_ready
+        root.setLevel(saved_level)
+
+
+def test_record_run_does_not_hijack_an_already_configured_logger():
+    """Idempotent and non-destructive: pytest's caplog, uvicorn and the MCP server all
+    configure logging themselves, and a second handler would duplicate every line."""
+    import logging
+
+    import runlog
+
+    root = logging.getLogger()
+    before = len(root.handlers)
+    runlog._LOGGING_READY = False
+    try:
+        runlog._ensure_logging()
+        runlog._LOGGING_READY = False
+        runlog._ensure_logging()
+        assert len(root.handlers) <= max(before, 1)
+    finally:
+        runlog._LOGGING_READY = True

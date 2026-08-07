@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     alert_after_zero_email_runs: int = 3   # consecutive runs with emailed == 0
     alert_after_zero_queue_runs: int = 5   # consecutive runs with queued == 0
     min_contactable_per_run: int = 1       # below this, the top of funnel is broken
+    # Emails sent with zero inbound EVER seen before we suspect the IMAP reader rather
+    # than a quiet market. 25 because a 0% reply rate over 25 cold emails is unlucky
+    # but ordinary, while 0 inbound over 25 is better explained by a reader that
+    # returns [] on every error. Set high enough that it cannot cry wolf early.
+    alert_after_sent_without_inbound: int = 25
     max_proposals_per_day: int = 15  # anti-spam guard
     # Hard Claude-spend cap per pipeline run. Raised 2.00 -> 5.00, sized from the run
     # that hit the old value: run 31172835060 (2026-08-07) spent $2.004245, considered

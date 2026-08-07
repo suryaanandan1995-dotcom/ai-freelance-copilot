@@ -21,6 +21,46 @@ from config import get_settings
 
 logger = logging.getLogger(__name__)
 
+#: Whether :func:`_ensure_logging` has already installed a handler this process.
+_LOGGING_READY = False
+
+
+def _ensure_logging() -> None:
+    """Make INFO visible, once, for any workflow run through :func:`record_run`.
+
+    Nothing in this codebase called ``logging.basicConfig`` outside the MCP server, so
+    production ran with Python's last-resort handler: ``logger.warning`` printed, but
+    every ``logger.info`` was **discarded**. That is not cosmetic, because the INFO
+    lines are precisely the ones that announce *that nothing happened*:
+
+      * ``fetch_replies: reply detection disabled — no-op``
+      * ``fetch_replies: SMTP host/user not configured — no-op``
+      * ``run_followups: auto_email disabled — no-op``
+      * ``send_outreach: auto_email disabled / smtp_host empty — not sending``
+      * ``max_proposals_per_day reached — stop queuing``
+
+    So a reply pass that never opened the inbox and one that opened it and found an
+    empty mailbox printed the identical ``inbound: 0``, with a zero exit code. This
+    repo's recurring defect is a mechanism that reports success while quietly not
+    doing its job; six of them were one un-set log level away from being invisible.
+
+    Idempotent and non-destructive: if the host application already configured
+    logging (pytest's caplog, uvicorn, the MCP server), we only raise the root level
+    if it is currently stricter than INFO, and never add a second handler.
+    """
+    global _LOGGING_READY
+    if _LOGGING_READY:
+        return
+    root = logging.getLogger()
+    if not root.handlers:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        )
+    elif root.level > logging.INFO or root.level == logging.NOTSET:
+        root.setLevel(logging.INFO)
+    _LOGGING_READY = True
+
 
 def _persist_run(workflow: str, ok: bool, cost_usd: float, stats: dict, error: str | None) -> None:
     """Write one RunRecord. Never raises — recording a run must not break the run."""
@@ -49,7 +89,12 @@ def record_run(workflow: str, fn: Callable[[], dict]) -> dict:
     On success: persist ``ok=True`` with the returned stats + its ``cost_usd``,
     then return the stats. On exception: persist ``ok=False`` with the error,
     send a failure alert to the owner, and re-raise (so CI surfaces the failure).
+
+    Also the one place that turns INFO logging on — see :func:`_ensure_logging`. Every
+    scheduled workflow enters here, so a no-op branch that explains itself at INFO is
+    now readable in the Actions log instead of being dropped.
     """
+    _ensure_logging()
     try:
         stats = fn() or {}
     except Exception as exc:
