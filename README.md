@@ -248,7 +248,7 @@ So every run attributes the funnel per source and states a verdict, worst first:
 BY SOURCE (worst first — retire what never produces)
   contract_jobs    fetched=0    new=0    contactable=0    queued=0   broken: HTTPStatusError: 400 Bad Request
   hn_freelancer    fetched=0    new=0    contactable=0    queued=0   dead: fetched nothing
-  remote_boards    fetched=25   new=25   contactable=0    queued=0   unreachable: leads have no email, so scoring them is wasted spend
+  remote_boards    fetched=25   new=25   contactable=0    queued=0   email-blocked: 25 new leads, none with a contact (best score 88) — human-submit channel only
   hn_hiring        fetched=12   new=12   contactable=7    queued=0   off-ICP: best score 68 < 70
 ```
 
@@ -260,9 +260,9 @@ The verdicts are deliberately distinct failures, not severity grades:
 | `dead` | fetched nothing at all | credentials, or the endpoint is gone |
 | `starved` | fetched leads, none survived the run cap | raise `max_leads_per_run` |
 | `stale` | fetched only leads already in the DB | widen the query, or retire it |
-| `unreachable` | real new leads, none with an email | stop paying to score it |
 | `unscored` | pre-gated before reaching the model | check the pre-gates |
 | `off-ICP` | scored, none cleared the bar | re-target, or lower the bar |
+| `email-blocked` | good leads, none carry an address | nothing — use the human-submit queue |
 
 Two properties matter more than the table itself:
 
@@ -273,6 +273,43 @@ Two properties matter more than the table itself:
   green runs.
 - **Dead sources sort above working ones, and reach the subject line.** A run that queues
   three drafts *and* has a broken source used to read as unqualified success.
+- **A verdict must be falsifiable by the code that emits it.** See below.
+
+### The verdict that made itself true
+
+`email-blocked` used to read `unreachable: leads have no email, so scoring them is wasted
+spend`, and it was checked *before* the `unscored` branch. Both facts together made it
+unfalsifiable. The pipeline dropped uncontactable leads **before** qualification, so such
+a source never produced a score, so `scores` was always empty, so this branch always won —
+and it accused the source of wasting scoring spend that had never been spent. The report
+was describing a decision the code had made, and presenting it as a property of the market.
+
+What it cost: `contract_jobs` queries ten country endpoints for day-rate contracts and is
+the only feed that reports an actual rate. Adzuna publishes no employer address **by
+design** — it monetises the redirect click — so 100% of its leads are uncontactable. For
+three consecutive runs it was therefore never scored, and the digest recommended retiring
+it. That is the feed that surfaced a **Sr Forward Deployed Engineer role at
+$208,000–$249,600**, the single best-matched lead the system has ever seen.
+
+Three changes, and the third is the one that generalises:
+
+1. **The gate moved to the stage it names.** `require_contact_before_draft` now blocks
+   *drafting*, not scoring. It was skipping the cheap Sonnet qualification in order to
+   protect the expensive Opus research+draft — which `route_after_qualify` already gates
+   on fit score. Saving the cheap stage to protect the expensive one is a category error,
+   and it bought silence at the price of the only signal that could have exposed it.
+2. **`unscored` is now checked first**, so "I never looked" can never be reported as a
+   finding about the leads.
+3. **The run-level bottleneck refuses to blame targeting on a censored sample.** When more
+   new leads were withheld from the model than shown to it, `_fit_summary` says so instead
+   of printing *"The lead mix is off-ICP; fix targeting, not the threshold."* It printed
+   that for three runs over a sample the best-targeted source was excluded from.
+
+The general rule, and the reason this section exists: **a check whose inputs are produced
+by the thing it is checking cannot fail.** It is the same shape as the unit test that
+asserted `contract_only == 1` against a mock looser than the real server, and as a fit gate
+set above any score the scorer can emit. When a report and the code it reports on share a
+cause, the report stops being evidence.
 
 The `starved` verdict exists because the first version of this report **got it wrong on
 its first live run**: it counted `fetched` *after* the run cap, and `fetch_all`

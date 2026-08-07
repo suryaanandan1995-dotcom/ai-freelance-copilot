@@ -61,9 +61,15 @@ def _source_lines(stats: dict) -> list[str]:
         "dead": 1,
         "starved": 2,
         "stale": 3,
-        "unreachable": 4,
-        "unscored": 5,
-        "off-ICP": 6,
+        "unscored": 4,
+        "off-ICP": 5,
+        # "email-blocked" ranks LAST, below off-ICP, because it is the only verdict
+        # that is not a defect: the source is working and its leads are good, they
+        # just carry no address (Adzuna sells the click). Ranked as a failure it
+        # advised retiring the feed that found a $208k-$249k FDE role. Those leads
+        # still reach the dashboard for human submission, so this line is a routing
+        # note, not a problem to fix.
+        "email-blocked": 7,
     }
 
     def rank(item) -> tuple[int, str]:

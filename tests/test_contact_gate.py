@@ -250,8 +250,22 @@ class CountingChat(FakeChat):
         return clone
 
 
-def test_uncontactable_lead_is_skipped_before_drafting(temp_db, monkeypatch):
-    """The core fix: no research, no draft, no spend on a lead with no address."""
+def test_uncontactable_lead_is_scored_but_never_drafted(temp_db, monkeypatch):
+    """The core fix: no research, no draft, no Opus spend on a lead with no address.
+
+    This test used to assert ``chat.calls == 0`` — the lead was skipped entirely,
+    including qualification. That saved the *cheap* Sonnet call in order to protect
+    the *expensive* Opus ones, which ``route_after_qualify`` already gates on fit
+    score anyway, and it cost far more than it saved: a source whose leads are all
+    uncontactable produced no scores at all, so the funnel reported
+    "unreachable: scoring them is wasted spend" about a source the code had refused
+    to score, and the run-level bottleneck declared the lead mix off-ICP over a
+    sample that excluded the best-targeted feed in the mix.
+
+    So the assertion is now ``== 1``, which is *stricter* than ``== 0`` was: it pins
+    both halves — that qualification happened, and that nothing after it did. A bare
+    ``&lt;= 1`` or a "no draft was queued" check would pass even if research ran.
+    """
     import outreach.sender as sender
     from pipeline import run_pipeline
 
@@ -270,8 +284,10 @@ def test_uncontactable_lead_is_skipped_before_drafting(temp_db, monkeypatch):
     assert stats["queued"] == 0
     assert stats["emailed"] == 0
     assert stats["emailed_skipped"].get("no_email_pregate") == 1
-    # The point of the whole change: zero LLM calls were made for this lead.
-    assert chat.calls == 0
+    # Exactly one call: qualification. Research, drafting and review never ran.
+    assert chat.calls == 1
+    # And the score is now visible to the funnel report, which is the whole point.
+    assert stats["fit"]["n"] == 1
     with dbsession.get_session() as session:
         assert session.query(OutreachRecord).count() == 0
 

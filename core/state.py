@@ -19,4 +19,9 @@ class CopilotState(TypedDict, total=False):
     proposal: dict[str, Any] | None  # serialized ProposalDraft
     verdict: dict[str, Any] | None   # serialized ComplianceVerdict
     disposition: str  # one of: "queue" | "drop" | "needs_research"
+    # False = qualify this lead but never spend Opus tokens drafting for it (set when
+    # the lead has no deliverable contact and auto-email is the goal). Absent means
+    # allowed: the score is the cheap half and is always worth having, because a source
+    # that is never scored cannot be told apart from one that scores badly.
+    draft_allowed: bool
     errors: list[str]

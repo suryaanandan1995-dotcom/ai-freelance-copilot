@@ -241,6 +241,30 @@ def test_fit_summary_blames_the_threshold_on_near_misses():
     assert "min_fit_score" in s["bottleneck"]
 
 
+def test_fit_summary_refuses_to_blame_targeting_on_a_censored_sample():
+    """A confident verdict over a sample that excluded the best-targeted source.
+
+    Three consecutive production runs printed "The lead mix is off-ICP; fix targeting,
+    not the threshold." while the day-rate contract feed — the one adapter built for
+    this ICP, and the only one that reports an actual day rate — contributed **zero**
+    scores, because its leads carry no email and were dropped before qualification.
+    That verdict sends you to fix targeting that is already correct, which is worse
+    than printing nothing: missing data makes you look, wrong data makes you act.
+    """
+    from pipeline import _fit_summary
+
+    # 4 scored, 40 withheld: nothing here licenses a claim about the lead mix.
+    s = _fit_summary([5, 8, 12, 15], threshold=70, unscored=40)
+    assert "sample" in s["bottleneck"]
+    assert "off-ICP" not in s["bottleneck"]
+    assert "fix targeting" not in s["bottleneck"]
+    assert s["unscored"] == 40
+
+    # Same scores, nothing withheld -> the off-ICP verdict is now earned.
+    s = _fit_summary([5, 8, 12, 15], threshold=70, unscored=0)
+    assert "off-ICP" in s["bottleneck"]
+
+
 def test_fit_summary_blames_the_sources_when_scores_are_far_below():
     from pipeline import _fit_summary
 
@@ -308,20 +332,53 @@ def test_a_source_that_fetched_nothing_is_reported_as_dead():
 
 
 def test_a_source_whose_leads_are_never_reachable_is_called_out_separately():
-    """Yields leads but no contactable one = paying to score the unemailable.
+    """Yields good leads that carry no address = a channel problem, not a bad source.
 
-    Distinct from "off-ICP" and from "dead": the leads are real and new, they score,
-    and none of them can ever be emailed. That burns scoring spend every single run
-    and is invisible in the run totals.
+    Distinct from "off-ICP" and from "dead": the leads are real, new, and they score
+    well — they simply have no email, so only the human-submit channel can use them.
+
+    This verdict used to read "unreachable: scoring them is wasted spend" and was
+    checked *before* the `not scores` branch, which made it unfalsifiable: the
+    pre-gate meant an uncontactable lead was never scored, so `scores` was always
+    empty, so this branch always won — and then advised retiring the feed that had
+    just surfaced a $208k-$249k Forward Deployed Engineer role. Adzuna publishes no
+    address by design (it sells the redirect click); that makes the feed
+    email-blocked, not wasteful.
     """
     from pipeline import _per_source_summary
 
     out = _per_source_summary(
-        {"remote_boards": {"fetched": 25, "new": 25, "contactable": 0, "queued": 0, "scores": []}},
+        {
+            "contract_jobs": {
+                "fetched": 25,
+                "new": 25,
+                "contactable": 0,
+                "queued": 0,
+                "scores": [72, 81, 88],
+            }
+        },
         threshold=70,
     )
-    assert "unreachable" in out["remote_boards"]["verdict"]
-    assert "wasted spend" in out["remote_boards"]["verdict"]
+    verdict = out["contract_jobs"]["verdict"]
+    assert "email-blocked" in verdict
+    assert "human-submit" in verdict
+    # It must NOT tell you to stop scoring a source that scores 88.
+    assert "wasted spend" not in verdict
+
+
+def test_an_unscored_source_is_not_reported_as_unreachable():
+    """The ordering bug itself, pinned.
+
+    With no scores at all, the honest report is "I never looked", not a confident
+    claim about the leads' quality or contactability.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"contra_startup": {"fetched": 9, "new": 9, "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert "unscored" in out["contra_startup"]["verdict"]
 
 
 def test_a_source_returning_only_already_seen_leads_is_stale_not_dead():

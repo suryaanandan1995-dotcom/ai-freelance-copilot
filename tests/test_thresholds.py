@@ -49,19 +49,24 @@ def test_email_gate_is_not_stricter_than_the_draft_gate():
     )
 
 
-def test_email_gate_is_within_reach_of_measured_scores():
-    """A threshold above every score the scorer has ever produced sends nothing.
+def test_email_gate_is_within_reach_of_the_scorer():
+    """A threshold above what the scorer can produce sends nothing.
 
-    The three highest fit scores observed in production are 78, 72 and 52. A gate at
-    80 is unclearable *given this scorer*; if the scorer is later recalibrated to
-    produce higher scores, raise this ceiling in the same commit and say why.
+    This assertion was originally written as ``<= 78``, on the belief that 78 was the
+    highest score the scorer had ever produced. That was wrong, and wrong in an
+    instructive way: 78 was the maximum of the three most recent *aggregates*, the
+    only numbers left in the Actions logs. The July run in ``copilot.db`` records 13
+    leads from one source scoring **72 to 88** — six at 82+, two at 87/88 — so the
+    scorer clears 80 comfortably when it is shown listings with a real title, company
+    and description.
+
+    Pinning a ceiling to that stale sample would have made this test the next gate
+    that fights the product: it would fail any future recalibration upward. So the
+    bound is the domain bound. What keeps the gate honest is the *relationship* tests
+    around it, plus the funnel report telling you which sources were never scored.
     """
-    highest_ever_observed = 78
-    assert _settings().outreach_min_fit <= highest_ever_observed, (
-        "No production run has ever scored a lead above 78, so a gate above that "
-        "cannot fire. Either lower the gate or recalibrate the scorer — but do not "
-        "leave a send path that is closed by arithmetic."
-    )
+    fit = _settings().outreach_min_fit
+    assert 0 < fit <= 100, "a fit gate outside 0-100 can never fire"
 
 
 def test_email_gate_still_excludes_the_bulk_of_leads():
