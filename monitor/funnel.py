@@ -259,7 +259,10 @@ def check_reply_detection_alive() -> dict:
         }
 
     if inbound == 0:
-        imap = getattr(settings, "imap_host", "") or "(unset)"
+        try:
+            imap = settings.resolved_imap_host() or "(unset)"
+        except Exception:  # noqa: BLE001 - a settings shim in tests may lack the method
+            imap = getattr(settings, "imap_host", "") or "(unset)"
         return {
             "name": "reply_detection",
             "ok": False,

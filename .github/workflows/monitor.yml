@@ -32,6 +32,11 @@ jobs:
       COPILOT_SMTP_HOST: ${{ secrets.COPILOT_SMTP_HOST }}
       COPILOT_SMTP_USER: ${{ secrets.COPILOT_SMTP_USER }}
       COPILOT_SMTP_PASSWORD: ${{ secrets.COPILOT_SMTP_PASSWORD }}
+      # Optional. Blank is normal: config.Settings.resolved_imap_host() derives the
+      # IMAP host from COPILOT_SMTP_HOST. Set this only for a provider whose IMAP
+      # server is not the SMTP host with the leading label swapped. The imap_login
+      # check logs in for real, so a wrong value is reported the next morning.
+      COPILOT_IMAP_HOST: ${{ secrets.COPILOT_IMAP_HOST }}
 
     steps:
       - name: Checkout

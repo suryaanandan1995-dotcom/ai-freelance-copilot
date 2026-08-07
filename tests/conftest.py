@@ -37,6 +37,12 @@ _TEST_ENV: dict[str, str] = {
     # No live Claude calls: tests inject FakeChat.
     "COPILOT_ANTHROPIC_API_KEY": "",
     "COPILOT_SMTP_HOST": "",
+    # The credentials too, not just the host: monitor.doctor._check_imap_login performs
+    # a REAL IMAP login, so a contributor's .env could otherwise make the offline suite
+    # open a network connection and authenticate as them.
+    "COPILOT_SMTP_USER": "",
+    "COPILOT_SMTP_PASSWORD": "",
+    "COPILOT_IMAP_HOST": "",
 }
 
 
