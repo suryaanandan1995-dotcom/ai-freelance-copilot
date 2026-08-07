@@ -4,7 +4,33 @@ Most email-reachable leads come from Hacker News "Who is hiring?" comments where
 posters publish a direct address ("email jobs@acme.com"). We regex-scan the
 lead's description and any string values in ``lead.raw``, lowercase + validate,
 and reject obvious non-contact addresses (noreply, error/asset domains, example
-placeholders). The first good address wins.
+placeholders).
+
+**"The first good address wins" was wrong, and it shipped.** Job descriptions from
+ATS-backed boards run 3,000-15,000 chars and carry a legal/compliance footer that
+appears *long before* any hiring address. With only bounce-type locals rejected,
+every one of these live-measured addresses passed the gate and was eligible to be
+cold-emailed:
+
+* ``accessibilitysupport@nbcuni.com``      — disability accommodations
+* ``candidate_accommodations@upstart.com`` — disability accommodations
+* ``security@harness.io``                  — vulnerability disclosure
+* ``hr@launchdarkly.com``                  — employee relations / ATS routing
+
+The single lead the last production run marked ``productive`` and queued for
+auto-email resolved to one of the accommodations inboxes. Cold-pitching freelance
+services to a disability-accommodations mailbox is the worst possible first
+impression, and it spends the one asset this system cannot rebuy — sender
+reputation (see the note above :func:`find_deliverable_email`).
+
+Two changes, in the order they matter:
+
+1. :data:`_NON_HIRING_TOKENS` / :data:`_NON_HIRING_SUBSTRINGS` reject institutional
+   mailboxes outright. The mirror failure is a gate so strict the market looks
+   empty, so ``jobs@``, ``careers@``, ``hiring@``, ``recruiting@``, ``talent@``,
+   ``hello@``, ``info@``, ``contact@`` and ordinary personal names all still pass.
+2. :func:`_rank_candidates` prefers a hiring-cued address over the earliest one, so
+   an ``accessibility@`` footer no longer outranks the ``careers@`` line below it.
 """
 from __future__ import annotations
 
@@ -56,6 +82,121 @@ _BAD_LOCAL_PREFIXES = (
     "notifications",
 )
 
+# --- institutional mailboxes -----------------------------------------------------
+#
+# Non-hiring departments that a long JD's boilerplate footer publishes. Matched as
+# whole tokens of the local-part (split on ``. _ - +`` and digits), NOT as
+# substrings, because the over-strict version of this gate is the failure this repo
+# keeps repeating — a filter that rejects real people makes the market look empty.
+#
+# The tradeoff that buys, stated explicitly: a person named **Salesi** or **Legaspi**
+# still passes (their token is "salesi"/"legaspi", not "sales"/"legal"), while a
+# genuine ``sales.team@`` or ``legal-notices@`` is still caught because those split
+# into tokens. The residual hole — a company using the exact single token ``sales``
+# as its only inbox — costs us one lead; the mirror mistake costs a real person a
+# cold pitch to their accommodations desk. We take the cheap loss.
+_NON_HIRING_TOKENS = frozenset(
+    {
+        # accessibility / accommodations — the address the last production run
+        # actually queued. Never, under any circumstances, a sales target.
+        "accessibility",
+        "accommodation",
+        "accommodations",
+        "ada",
+        # security & data protection
+        "security",
+        "infosec",
+        "abuse",
+        "privacy",
+        "dpo",
+        "gdpr",
+        # legal / compliance
+        "legal",
+        "compliance",
+        "ethics",
+        "copyright",
+        "dmca",
+        "trademark",
+        # comms / IR — a human reads these, but not for procurement
+        "press",
+        "pressoffice",
+        "media",
+        "investor",
+        "investors",
+        "ir",
+        # inbound funnels that route away from a decision-maker
+        "support",
+        "helpdesk",
+        "webmaster",
+        "hostmaster",
+        "billing",
+        "invoice",
+        "invoices",
+        "accounts",
+        "accounting",
+        "payables",
+        "sales",
+        "marketing",
+        "unsubscribe",
+        "optout",
+        # HR/employee-relations desks: these handle *existing* employees and ATS
+        # routing, not vendor conversations. hr@launchdarkly.com was measured live.
+        "hr",
+        "humanresources",
+        "people",
+        "peopleops",
+        "benefits",
+        "payroll",
+    }
+)
+
+# Glued-together institutional locals with no separator to tokenize on — e.g. the
+# measured ``accessibilitysupport@nbcuni.com``. Only words long and specific enough
+# that no human name can contain them belong here; anything shorter goes in
+# _NON_HIRING_TOKENS so it is boundary-matched instead.
+_NON_HIRING_SUBSTRINGS = (
+    "accessibility",
+    "accommodation",
+    "compliance",
+    "unsubscribe",
+    "webmaster",
+    "dataprotection",
+    "dataprivacy",
+    "investorrelations",
+    "humanresources",
+)
+
+# Local-parts that ARE the hiring contact. Prefix-matched against each token so
+# plurals and compounds count ("careers", "talentacquisition", "recruiting").
+# These outrank everything else during selection and must never be rejected.
+_HIRING_STEMS = (
+    "job",
+    "career",
+    "hiring",
+    "hire",
+    "apply",
+    "applicant",
+    "recruit",
+    "talent",
+    "staffing",
+)
+
+# Words in the surrounding prose that mark an address as the one to write to.
+# Used only to break ties between otherwise-acceptable candidates.
+_HIRING_CUE_RE = re.compile(
+    r"\b(?:e-?mail|apply|applications?|send\s+(?:your|us|me|a)|resume|résumé|cv|"
+    r"contact\s+us|reach\s+out|reach\s+me|get\s+in\s+touch|write\s+to|"
+    r"hiring|we'?re\s+looking|drop\s+(?:us|me))\b",
+    re.IGNORECASE,
+)
+
+#: Characters either side of a match that count as "surrounding text". Wide enough
+#: to span "Interested? Send your CV to <addr>", narrow enough that a compliance
+#: footer 2,000 chars up the page cannot lend its cue to an unrelated address.
+_CUE_WINDOW = 160
+
+_TOKEN_SPLIT_RE = re.compile(r"[^a-z]+")
+
 # Domains/substrings that are placeholders, infra, or asset hosts — not contacts.
 _BAD_DOMAIN_SUBSTRINGS = (
     "@example.",
@@ -82,12 +223,47 @@ _ASSET_EXTENSIONS = (
 )
 
 
+def _local_tokens(local: str) -> list[str]:
+    """Split a local-part into alphabetic words: ``candidate_accommodations`` →
+    ``["candidate", "accommodations"]``.
+
+    Tokenizing is what keeps the gate from eating real people: matching
+    ``_NON_HIRING_TOKENS`` against these words means "salesi" never equals "sales".
+    """
+    return [t for t in _TOKEN_SPLIT_RE.split(local.lower()) if t]
+
+
+def _is_hiring_local(local: str) -> bool:
+    """True if any token of the local-part is a hiring word (``jobs``, ``careers``)."""
+    return any(
+        token.startswith(_HIRING_STEMS) for token in _local_tokens(local)
+    )
+
+
+def _is_non_hiring_local(local: str) -> bool:
+    """True for institutional mailboxes that must never receive a cold pitch.
+
+    A hiring word anywhere in the local-part wins outright: ``jobs-support@`` and
+    ``careers.accessibility@`` are hiring inboxes that happen to name a department,
+    and dropping them would be the over-strict failure this gate exists to avoid.
+    """
+    if _is_hiring_local(local):
+        return False
+    tokens = _local_tokens(local)
+    if any(token in _NON_HIRING_TOKENS for token in tokens):
+        return True
+    # No separator to tokenize on, e.g. "accessibilitysupport@nbcuni.com" (measured).
+    return any(sub in local.lower() for sub in _NON_HIRING_SUBSTRINGS)
+
+
 def _is_good_email(email: str) -> bool:
     email = email.lower()
     if "@" not in email or "." not in email.split("@", 1)[1]:
         return False
     local, _, domain = email.partition("@")
     if any(local.startswith(p) for p in _BAD_LOCAL_PREFIXES):
+        return False
+    if _is_non_hiring_local(local):
         return False
     if any(sub in email for sub in _BAD_DOMAIN_SUBSTRINGS):
         return False
@@ -113,23 +289,66 @@ def _iter_raw_strings(value: Any) -> list[str]:
     return found
 
 
+def _cue_score(text: str, start: int, end: int) -> int:
+    """1 if a hiring cue sits within :data:`_CUE_WINDOW` chars of the match, else 0."""
+    window = text[max(0, start - _CUE_WINDOW) : end + _CUE_WINDOW]
+    return 1 if _HIRING_CUE_RE.search(window) else 0
+
+
+def _best_email_in(text: str) -> str | None:
+    """Best acceptable address in one block of text, or ``None``.
+
+    Ranking, highest first — a *later* hiring address beats an *earlier* generic one,
+    which is the whole point: a compliance footer at char 400 must not beat the
+    ``careers@`` line at char 6,000.
+
+    1. the local-part is a hiring word (``jobs``, ``careers``, ``recruiting``);
+    2. otherwise, prose near the address invites contact ("email", "send your CV");
+    3. otherwise, first found — the pre-existing behaviour, and still exactly what
+       happens when there is only one candidate.
+    """
+    # Scan the raw text first (catches "email: x@y.com", "contact: x@y.com"), then a
+    # de-obfuscated copy ("name [at] domain [dot] com").
+    variants = [text]
+    deob = _deobfuscate(text)
+    if deob != text:
+        variants.append(deob)
+
+    best: tuple[int, int, str] | None = None
+    for variant in variants:
+        for order, match in enumerate(_EMAIL_RE.finditer(variant)):
+            email = match.group(0).lower().strip(".,;:<>()[]\"'")
+            if not _is_good_email(email):
+                continue
+            local, _, _domain = email.partition("@")
+            rank = 2 if _is_hiring_local(local) else _cue_score(
+                variant, match.start(), match.end()
+            )
+            # Negative order makes earlier matches win ties without a second sort key.
+            scored = (rank, -order, email)
+            if best is None or scored > best:
+                best = scored
+        # The raw variant already yielded a winner; the de-obfuscated copy is a
+        # fallback for text that hid its address, not a second opinion.
+        if best is not None:
+            break
+    return best[2] if best else None
+
+
 def find_contact_email(lead: Lead) -> str | None:
-    """Return the first valid contact email found in the lead, else ``None``."""
+    """Return the best valid contact email found in the lead, else ``None``.
+
+    Description before ``raw``: the human-written body is where a poster puts the
+    address they want used. Within a block, see :func:`_best_email_in` for why "best"
+    replaced "first".
+    """
     haystacks: list[str] = [lead.description or ""]
     haystacks.extend(_iter_raw_strings(lead.raw or {}))
 
     for text in haystacks:
-        # Scan the raw text first (catches "email: x@y.com", "contact: x@y.com"),
-        # then a de-obfuscated copy ("name [at] domain [dot] com").
-        candidates = [text]
-        deob = _deobfuscate(text)
-        if deob != text:
-            candidates.append(deob)
-        for candidate in candidates:
-            for match in _EMAIL_RE.findall(candidate):
-                email = match.lower().strip(".,;:<>()[]\"'")
-                if _is_good_email(email):
-                    return email
+        email = _best_email_in(text)
+        if email:
+            return email
     return None
 
 

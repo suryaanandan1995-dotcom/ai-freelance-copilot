@@ -122,6 +122,10 @@ class FakeSource:
 
 # --------------------------------------------------------------------------- #
 # extract
+#
+# Smoke coverage only. *Which* of several addresses in a long JD we may write to —
+# and the four measured institutional inboxes that used to pass this gate — lives in
+# tests/test_contact_targeting.py.
 # --------------------------------------------------------------------------- #
 def test_find_contact_email_extracts_real_email():
     from outreach.extract import find_contact_email
