@@ -20,6 +20,7 @@ from __future__ import annotations
 import email
 import imaplib
 import logging
+from datetime import UTC, datetime, timedelta
 from email.header import decode_header, make_header
 from email.message import Message
 from email.utils import parseaddr
@@ -29,6 +30,11 @@ from db.models import OutreachRecord, ReplyRecord
 from db.session import get_session
 
 logger = logging.getLogger(__name__)
+
+#: How far back to sweep ALREADY-READ mail for replies the owner opened first. Bounded
+#: so the search stays cheap and cannot re-import ancient threads: a reply that matters
+#: is answered within days, and every hit is deduped on message_id anyway.
+_SEEN_LOOKBACK_DAYS = 14
 
 
 def _decode(value: str | None) -> str:
@@ -110,12 +116,35 @@ def fetch_replies(limit: int = 20) -> list[dict]:
         conn = imaplib.IMAP4_SSL(imap_host, settings.imap_port)
         conn.login(settings.smtp_user, settings.smtp_password)
         conn.select("INBOX")
+        # Two searches, because "unread" and "replied to us" are different questions.
+        #
+        # UNSEEN alone loses any reply the owner opens first, permanently — not until
+        # the next pass, but forever, since nothing ever restores the flag. Measured
+        # 2026-08-07: the first real reply in a month arrived at 16:58 UTC, was read and
+        # answered by hand at 17:30, and was therefore invisible to every subsequent
+        # run. The lead stays replied=False, so followup.runner keeps selecting it and
+        # nudges someone already mid-conversation.
+        #
+        # Recently-read messages are therefore swept too, but flagged human_handled so
+        # the runner records them (stopping follow-ups) WITHOUT auto-answering: a thread
+        # the owner has already opened is one the owner is handling, and two voices from
+        # one address is worse than no reply. Duplicate records are prevented by
+        # message_id in reply.runner._record_inbound, since a read message keeps
+        # matching this search on every pass.
+        ids: list[tuple[bytes, bool]] = []
         typ, data = conn.search(None, "UNSEEN")
-        if typ != "OK" or not data or not data[0]:
+        if typ == "OK" and data and data[0]:
+            ids += [(i, False) for i in data[0].split()[:limit]]
+
+        since = (datetime.now(UTC) - timedelta(days=_SEEN_LOOKBACK_DAYS)).strftime("%d-%b-%Y")
+        typ, data = conn.search(None, "SEEN", "SINCE", since)
+        if typ == "OK" and data and data[0]:
+            ids += [(i, True) for i in data[0].split()[-limit:]]
+
+        if not ids:
             return []
 
-        ids = data[0].split()[:limit]
-        for msg_id in ids:
+        for msg_id, human_handled in ids:
             try:
                 typ, raw = conn.fetch(msg_id, "(RFC822)")
                 if typ != "OK" or not raw or not raw[0]:
@@ -132,10 +161,15 @@ def fetch_replies(limit: int = 20) -> list[dict]:
                         "body": _plain_body(msg),
                         "message_id": (msg.get("Message-ID") or "").strip() or None,
                         "references": (msg.get("References") or "").strip() or None,
+                        # True when the owner had already read this before we saw it:
+                        # record it, but let the human own the conversation.
+                        "human_handled": human_handled,
                     }
                 )
-                # Only mark ours as seen; unknown senders stay UNSEEN.
-                conn.store(msg_id, "+FLAGS", "\\Seen")
+                # Only mark ours as seen; unknown senders stay UNSEEN. Already-seen
+                # messages need no store call.
+                if not human_handled:
+                    conn.store(msg_id, "+FLAGS", "\\Seen")
             except Exception as exc:  # one bad message shouldn't kill the batch
                 logger.warning("fetch_replies: skipped a message: %s", exc)
                 continue

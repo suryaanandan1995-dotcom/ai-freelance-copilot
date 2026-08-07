@@ -133,6 +133,9 @@ def test_run_reply_pass_noop_when_both_gates_off(temp_db, monkeypatch):
         "inbound": 0,
         "replied": 0,
         "detected_only": 0,
+        # Replies the owner had already opened: recorded so follow-ups stop, but never
+        # auto-answered, so the bot cannot talk over a live human conversation.
+        "human_handled": 0,
         "suppressed": 0,
         "skipped": 0,
         "capped": 0,
@@ -411,3 +414,90 @@ def test_classify_and_draft_optout_suppress(auto_reply_on):
 
     res = classify_and_draft(PROSPECT, "unsubscribe please", chat=chat)
     assert res["action"] == "suppress"
+
+
+# --------------------------------------------------------------------------- #
+# Replies the owner reads first
+#
+# Measured 2026-08-07, on the first real reply this system ever received: the prospect
+# answered at 16:58 UTC, the owner read and answered it by hand at 17:30, and the reply
+# runner had last swept at 16:46. Searching UNSEEN only, every later pass saw nothing —
+# not temporarily, but permanently, because nothing restores the \Seen flag. The lead
+# stayed replied=False, so followup.runner would keep nudging a live conversation.
+# --------------------------------------------------------------------------- #
+def test_a_reply_the_owner_already_read_still_stops_the_followups(
+    temp_db, auto_reply_on, monkeypatch
+):
+    """The whole point: recorded and marked replied even though it arrived pre-read."""
+    import reply.runner as runner
+    from db.session import get_session
+
+    _patch_fetch(monkeypatch, [dict(_inbound("Could you share your resume?"),
+                                    human_handled=True)])
+    monkeypatch.setattr(
+        "reply.sender.send_reply",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not send")),
+    )
+
+    stats = runner.run_reply_pass(chat=FakeChat(responses=["unused"]))
+
+    assert stats["inbound"] == 1
+    assert stats["human_handled"] == 1
+    assert stats["replied"] == 0  # never auto-answered
+    with get_session() as session:
+        rec = session.query(OutreachRecord).filter_by(email=PROSPECT).one()
+        assert rec.replied is True  # <- what stops followup.runner selecting it
+
+
+def test_the_bot_does_not_talk_over_the_owner_even_with_auto_reply_on(
+    temp_db, auto_reply_on, monkeypatch
+):
+    """Not gated on auto_reply, deliberately.
+
+    A thread the owner has opened is one the owner is handling. Two different voices
+    from one address is a worse outcome than no autonomous reply at all, so this holds
+    even with autonomous replying fully enabled.
+    """
+    import reply.runner as runner
+
+    sent: list = []
+    _patch_fetch(monkeypatch, [dict(_inbound("What's your rate?"), human_handled=True)])
+    monkeypatch.setattr("reply.sender.send_reply", lambda *a, **k: sent.append(a) or True)
+
+    runner.run_reply_pass(chat=FakeChat(responses=["Subject: x\n\nbody"]))
+
+    assert sent == []
+
+
+def test_an_unread_reply_is_still_auto_answered(temp_db, auto_reply_on, monkeypatch):
+    """The mirror guard: the already-read sweep must not disable normal auto-reply."""
+    import reply.runner as runner
+
+    sent: list = []
+    _patch_fetch(monkeypatch, [dict(_inbound("Tell me more."), human_handled=False)])
+    monkeypatch.setattr("reply.sender.send_reply", lambda *a, **k: sent.append(a) or True)
+
+    stats = runner.run_reply_pass(chat=FakeChat(responses=["Subject: x\n\nbody"]))
+
+    assert stats["human_handled"] == 0
+    assert stats["replied"] == 1
+    assert len(sent) == 1
+
+
+def test_the_same_read_message_is_not_recorded_twice(temp_db, auto_reply_on, monkeypatch):
+    """The already-read sweep re-surfaces the same message on every pass.
+
+    Without message_id dedupe, one reply would inflate the reply rate every two hours
+    and — with auto_reply on — be answered repeatedly.
+    """
+    import reply.runner as runner
+    from db.session import get_session
+
+    _patch_fetch(monkeypatch, [dict(_inbound("Same message"), human_handled=True)])
+    first = runner.run_reply_pass(chat=FakeChat(responses=["unused"]))
+    second = runner.run_reply_pass(chat=FakeChat(responses=["unused"]))
+
+    assert first["inbound"] == 1
+    assert second["inbound"] == 0  # deduped on message_id
+    with get_session() as session:
+        assert session.query(ReplyRecord).filter_by(direction="in").count() == 1

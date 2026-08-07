@@ -41,6 +41,30 @@ def _mark_replied(email: str) -> None:
         logger.warning("run_reply_pass: could not mark %s replied: %s", addr, exc)
 
 
+def _already_recorded(message_id: str | None) -> bool:
+    """True if this exact message is already in the log.
+
+    Required because the inbox sweep includes already-READ mail (see
+    ``reply.inbox``), which keeps matching the search on every pass — without this,
+    one reply the owner opened would be re-recorded every two hours, inflating the
+    reply count and, with auto_reply on, re-answered each time.
+    """
+    mid = (message_id or "").strip()
+    if not mid:
+        return False  # nothing to dedupe on; treat as new rather than silently drop
+    try:
+        with get_session() as session:
+            return (
+                session.query(ReplyRecord)
+                .filter(ReplyRecord.message_id == mid, ReplyRecord.direction == "in")
+                .first()
+                is not None
+            )
+    except Exception as exc:  # noqa: BLE001 - never break the pass over a dedupe check
+        logger.warning("run_reply_pass: dedupe check failed for %s: %s", mid, exc)
+        return False
+
+
 def _record_inbound(email: str, subject: str, body: str, message_id: str | None) -> None:
     with get_session() as session:
         session.add(
@@ -98,6 +122,7 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
         "inbound": 0,
         "replied": 0,
         "detected_only": 0,  # recorded + marked replied, but not auto-answered
+        "human_handled": 0,  # owner had already opened it: recorded, never auto-answered
         "suppressed": 0,
         "skipped": 0,
         "capped": 0,
@@ -148,6 +173,12 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
             in_reply_to = reply.get("message_id")
             references = reply.get("references")
 
+            if _already_recorded(in_reply_to):
+                # Seen on an earlier pass. The already-read sweep re-surfaces the same
+                # message every run, so this is the normal path, not an anomaly.
+                stats["skipped"] += 1
+                continue
+
             stats["inbound"] += 1
             _record_inbound(email, subject, body, in_reply_to)
             # A reply from a contacted address stops any pending follow-ups.
@@ -155,6 +186,15 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
 
             if is_suppressed(email):
                 stats["skipped"] += 1
+                continue
+
+            # The owner had already opened this thread, so the owner is answering it.
+            # Recording + marking replied above is the part that matters (it stops the
+            # follow-up nudge); adding a second, autonomous voice to a live human
+            # conversation is worse than staying quiet. This is deliberately NOT gated
+            # on auto_reply: it holds even with autonomous replies fully enabled.
+            if reply.get("human_handled"):
+                stats["human_handled"] += 1
                 continue
 
             if not responding:
