@@ -76,6 +76,41 @@ def _format_proof(chunks: list[dict[str, Any]]) -> str:
     return "\n".join(f"- {c.get('text', '')} [{c.get('source', '')}]" for c in chunks)
 
 
+def _project_links(projects: list[str], settings) -> str:
+    """``name -> real repo URL`` lines for the projects a pitch may cite.
+
+    Measured on a live pitch drafted 2026-08-07: the email named
+    ``devsecops-pipeline-templates`` and offered it as "the code's here if you want to
+    poke at it". **That repository does not exist** (404). The real one is
+    ``devsecops-cicd-pipeline``.
+
+    The cause was a prompt that demanded something it never supplied. It says a named
+    project with no link is an unverifiable claim — correct — but the only URL in the
+    context was ``owner_site``, the portfolio root. So the model produced a
+    plausible-sounding repo name of its own, and the single most checkable sentence in
+    a cold email pointed at nothing.
+
+    That is worse than omitting the link. A prospect who clicks and gets a 404
+    concludes the projects are invented, which is exactly the objection this pitch
+    exists to pre-empt — and it is the *interested* reader, the only one who matters,
+    who clicks.
+
+    Passing explicit ``name -> URL`` pairs removes the need to guess. Names come from
+    the retriever's ``source`` field, which is the real directory name of an ingested
+    repo, so a URL built from it resolves.
+    """
+    base = (getattr(settings, "owner_github", "") or "").rstrip("/")
+    names = [n for n in dict.fromkeys(projects or []) if n]
+    if not base or not names:
+        return ""
+    lines = "\n".join(f"- {n}: {base}/{n}" for n in names)
+    return (
+        "Real repository URLs for the projects above — use the URL EXACTLY as written "
+        "next to the project you cite, and never invent or guess a repo name or link:\n"
+        f"{lines}\n\n"
+    )
+
+
 def _parse(raw: str, fallback_subject: str) -> dict:
     """Split model output into {subject, body}, robust to a missing prefix."""
     text = (raw or "").strip()
@@ -145,8 +180,13 @@ def draft_email(
         f"Why this engineer fits: {'; '.join(scored.reasons)}\n"
         f"Portfolio projects that prove it: {', '.join(scored.matched_projects)}\n\n"
         f"Retrieved proof points:\n{_format_proof(proof_chunks)}\n\n"
-        f"Engineer name: {settings.owner_name}\n"
-        f"Portfolio (cite this link next to the project you name): {settings.owner_site}\n"
+        + _project_links(
+            list(scored.matched_projects or [])
+            + [c.get("source", "") for c in proof_chunks],
+            settings,
+        )
+        + f"Engineer name: {settings.owner_name}\n"
+        f"Portfolio hub (use only if you cite no specific project): {settings.owner_site}\n"
         f"LinkedIn: {settings.owner_linkedin}\n"
         f"Soft CTA link (a 15-min call): {settings.owner_calendly}\n\n"
         "Write the cold intro email now in the required Subject + body format."
