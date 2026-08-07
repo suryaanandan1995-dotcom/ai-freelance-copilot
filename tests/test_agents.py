@@ -67,6 +67,72 @@ def test_qualifier_scores_and_matches_projects():
     assert scored.matched_projects == ["multi-cloud-k8s-terraform"]
 
 
+def test_qualifier_shows_the_model_the_portfolio_it_is_scoring_against():
+    """`qualify` used to accept a retriever and throw it away.
+
+    Its docstring said "unused here" while `build_graph` passed one in on every call.
+    So the one agent whose entire job is a *comparison* held only one side of it: a
+    list of repo names, with no evidence of what those repos are. Both agents that
+    merely write prose already retrieved real chunks. A lead asking for exactly what
+    `rag-platform-k8s` proves got no lift from it.
+    """
+    captured: list[str] = []
+
+    class RecordingChat(FakeChat):
+        def with_structured_output(self, schema):
+            # FakeChat.with_structured_output returns a COPY, so overriding invoke on
+            # this class alone records nothing — the same trap CountingChat documents
+            # in test_contact_gate.py. Reach into the clone instead.
+            clone = super().with_structured_output(schema)
+
+            class _Recording(type(clone)):  # pragma: no cover - thin shim
+                def invoke(self, messages):
+                    captured.append(messages[-1]["content"])
+                    return super().invoke(messages)
+
+            clone.__class__ = _Recording
+            return clone
+
+    chat = RecordingChat(
+        structured={
+            "lead": _lead().model_dump(),
+            "fit_score": 88,
+            "reasons": ["k8s overlap"],
+            "matched_projects": [],
+        }
+    )
+    qualify(_lead(), retriever=FakeRetriever(), chat=chat)
+
+    assert captured, "the qualifier never called the model"
+    user_msg = captured[-1]
+    assert "Portfolio evidence" in user_msg
+    # The retrieved chunk text itself must reach the prompt, not just its name.
+    assert "reusable Terraform modules" in user_msg
+
+
+def test_qualifier_survives_a_missing_portfolio_store():
+    """A KB that cannot be read must score conservatively, never fail the run.
+
+    The whole pipeline is unattended; an exception here would stop a scheduled run
+    over a degraded index rather than a real error.
+    """
+
+    class BrokenRetriever:
+        def retrieve(self, query, k=5):
+            raise RuntimeError("index corrupt")
+
+    chat = FakeChat(
+        structured={
+            "lead": _lead().model_dump(),
+            "fit_score": 55,
+            "reasons": ["no evidence available"],
+            "matched_projects": [],
+        }
+    )
+    scored = qualify(_lead(), retriever=BrokenRetriever(), chat=chat)
+    assert scored.fit_score == 55
+
+
 def test_researcher_returns_enrichment():
     chat = FakeChat(
         structured={
@@ -220,3 +286,59 @@ def test_qualifier_prompt_names_the_target_segments():
         assert segment in low
     # And it must warn off the measured false positives.
     assert "customer service" in prompt.lower()
+
+
+# --------------------------------------------------------------------------- #
+# the rubric is linted, because a score distribution cannot be
+# --------------------------------------------------------------------------- #
+def test_qualifier_rubric_anchors_the_scale():
+    """An unanchored 0-100 scale plus a list of deductions makes an LLM score low.
+
+    Measured: p50 28, p90 58 across three production runs, with the same model that
+    had scored 13 of 13 leads at 72-88 in July. The prompt told the model only what 0
+    and 100 mean, then gave it two things to deduct for — so the bands below are the
+    fix, and this lint is what keeps them from being deleted as verbose. A prompt lint
+    is checkable offline; the distribution it protects needs a live run and a week.
+    """
+    from agents.qualifier import _system_prompt, portfolio_projects
+
+    prompt = _system_prompt(portfolio_projects())
+    # The threshold the code actually enforces must be stated to the model.
+    assert "70" in prompt
+    # Named bands, not just the endpoints.
+    for band in ("90-100", "75-89", "60-74", "40-59", "20-39", "0-19"):
+        assert band in prompt, f"missing anchor band {band}"
+
+
+def test_qualifier_rubric_does_not_penalise_missing_information():
+    """Only 1 of 7 adapters sets `budget`, so the prompt reads "Budget: unknown".
+
+    That made the rubric asymmetric — every reason to deduct was checkable in the
+    input, and the headline reason to award (day-rate contract work) was not. Terse
+    board listings were being capped low for being terse.
+    """
+    from agents.qualifier import _system_prompt, portfolio_projects
+
+    low = _system_prompt(portfolio_projects()).lower()
+    assert "missing information is not a negative" in low
+    assert "must never cap" in low
+    # Permanent framing must not subtract: these segments hire perm and contract-to-hire.
+    assert "does not subtract" in low
+
+
+def test_qualifier_rubric_scores_remote_roles_worldwide_not_just_the_uk():
+    """The prompt used to deduct for "on-site presence outside the UK".
+
+    That was written when the only source was a UK feed. Sourcing now spans ten
+    country endpoints across the US, EU and ANZ, every one queried with a remote
+    filter — so the clause penalised every lead from the nine new markets for being
+    foreign, which is the opposite of what the expansion was for. A gate must not
+    fight the product it is part of.
+    """
+    from agents.qualifier import _system_prompt, portfolio_projects
+
+    prompt = _system_prompt(portfolio_projects())
+    assert "outside the UK" not in prompt
+    low = prompt.lower()
+    assert "remotely" in low or "remote" in low
+    assert "neither is the country" in low

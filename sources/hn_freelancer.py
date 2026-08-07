@@ -23,6 +23,7 @@ import httpx
 
 from core.schemas import Lead
 from sources._keywords import extract_tags, matches_keywords
+from sources._text import detect_company, first_line, strip_html
 from sources.base import LeadSource
 
 logger = logging.getLogger(__name__)
@@ -31,8 +32,6 @@ ALGOLIA_BASE = "https://hn.algolia.com/api/v1"
 HN_ITEM_URL = "https://news.ycombinator.com/item?id="
 USER_AGENT = "ai-freelance-copilot/1.0 (+https://github.com) read-only lead scanner"
 TIMEOUT = 10.0
-
-_TAG_RE = re.compile(r"<[^>]+>")
 
 # Phrases that clearly mark the "client is hiring a freelancer" side.
 _SEEKING_FREELANCER_RE = re.compile(
@@ -50,23 +49,12 @@ _SEEKING_WORK_RE = re.compile(
 )
 
 
-def _strip_html(text: str) -> str:
-    return _TAG_RE.sub(" ", text or "").replace("&amp;", "&").strip()
-
-
-def _first_line(text: str) -> str:
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    return (line[:117] + "...") if len(line) > 120 else line
-
-
-def _detect_company(text: str) -> str | None:
-    """Best-effort company name: leading token before a ``|`` delimiter."""
-    first = text.strip().splitlines()[0] if text.strip() else ""
-    if "|" in first:
-        candidate = first.split("|", 1)[0].strip()
-        if 0 < len(candidate) <= 60:
-            return candidate
-    return None
+# NOTE: ``strip_html``, ``first_line`` and ``detect_company`` now come from
+# ``sources._text``, shared with hn_hiring — the two adapters read the same threads
+# with the same conventions, and keeping private copies is how the entity bug
+# survived here as a hand-rolled ``.replace("&amp;", "&")``: it decoded 14 of the
+# 480 entities measured across 50 live HN leads and left ``&#x27;`` and ``&#x2F;``
+# in the text the model reads.
 
 
 def _is_seeking_freelancer(text: str) -> bool:
@@ -86,6 +74,12 @@ class HNFreelancerSource(LeadSource):
 
     def __init__(self, base_url: str = ALGOLIA_BASE) -> None:
         self.base_url = base_url.rstrip("/")
+        #: Last transport/HTTP failure, or None if every request succeeded. Read by
+        #: the funnel report so "Algolia rejected us" is not reported as "no jobs
+        #: matched": a swallowed 500 and a genuinely quiet thread both returned [] and
+        #: both surfaced as ``dead: fetched nothing``, which names the wrong lever —
+        #: one needs a code fix, the other needs different queries.
+        self.last_error: str | None = None
 
     def _find_story_id(self, client: httpx.Client) -> str | None:
         try:
@@ -107,6 +101,7 @@ class HNFreelancerSource(LeadSource):
             hits = resp.json().get("hits", [])
         except Exception as exc:
             logger.warning("hn_freelancer: story search failed: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return None
         if not hits:
             return None
@@ -119,10 +114,11 @@ class HNFreelancerSource(LeadSource):
             return resp.json()
         except Exception as exc:
             logger.warning("hn_freelancer: item fetch failed: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return None
 
     def _comment_to_lead(self, comment: dict) -> Lead | None:
-        text = _strip_html(comment.get("text") or "")
+        text = strip_html(comment.get("text") or "")
         if not text or not _is_seeking_freelancer(text):
             return None
         object_id = comment.get("objectID") or comment.get("id")
@@ -132,10 +128,10 @@ class HNFreelancerSource(LeadSource):
         return Lead(
             source=self.name,
             external_id=object_id,
-            title=_first_line(text) or "HN seeking-freelancer post",
+            title=first_line(text) or "HN seeking-freelancer post",
             description=text,
             url=f"{HN_ITEM_URL}{object_id}",
-            company=_detect_company(text) or comment.get("author"),
+            company=detect_company(text) or comment.get("author"),
             posted_at=comment.get("created_at"),
             tags=extract_tags(text),
             raw=comment,
@@ -143,6 +139,10 @@ class HNFreelancerSource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         leads: list[Lead] = []
+        # Per-fetch, so a source that recovers stops reporting a stale error. Without
+        # the reset one bad run marks the feed ``broken`` forever, which is the mirror
+        # of the bug last_error exists to fix.
+        self.last_error = None
         try:
             with httpx.Client(
                 headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
@@ -153,6 +153,7 @@ class HNFreelancerSource(LeadSource):
                 story = self._fetch_story(client, story_id)
         except Exception as exc:  # pragma: no cover
             logger.warning("hn_freelancer: client error: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return leads
 
         if not story:

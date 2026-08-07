@@ -271,6 +271,113 @@ def test_contra_startup_returns_empty_on_error(monkeypatch):
     assert src.fetch() == []
 
 
+def test_contra_startup_applies_the_keyword_gate(monkeypatch):
+    """This adapter had no keyword gate at all, unlike every sibling.
+
+    Its NoDesk feed is scoped to "engineering", not DevOps, so live leads on
+    2026-08-07 included these two verbatim — each one a Claude call spent to score a
+    role that cannot fit.
+    """
+    entries = [
+        _rss_entry(
+            id="nodesk-1",
+            link="https://nodesk.co/remote-jobs/1",
+            title="Senior React Native Developer",
+            summary="Ship our iOS and Android app.",
+        ),
+        _rss_entry(
+            id="nodesk-2",
+            link="https://nodesk.co/remote-jobs/2",
+            title="Software engineer at Sticker Mule",
+            summary="Work on our ordering system.",
+        ),
+        _rss_entry(
+            id="nodesk-3",
+            link="https://nodesk.co/remote-jobs/3",
+            title="Platform Engineer at Fly.io",
+            summary="Run our Kubernetes fleet with Terraform.",
+        ),
+    ]
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(entries))
+    leads = ContraStartupSource(feeds=["https://nodesk/feed"]).fetch(limit=10)
+
+    assert [lead.external_id for lead in leads] == ["nodesk-3"]
+
+
+def test_contra_startup_gate_passes_a_role_whose_stack_is_only_in_the_body(monkeypatch):
+    """The gate must be able to *pass*, not just reject.
+
+    Reading the title alone would drop genuine infra roles with generic titles and
+    make a live board look like an empty market — the failure mode this repo keeps
+    hitting. So the gate reads title and description together, like its siblings.
+    """
+    entries = [
+        _rss_entry(
+            id="nodesk-4",
+            link="https://nodesk.co/remote-jobs/4",
+            title="Engineer #3 at Tinybird",
+            summary="You will own our AWS estate: Terraform, EKS, CI/CD, observability.",
+        )
+    ]
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(entries))
+    leads = ContraStartupSource(feeds=["https://nodesk/feed"]).fetch(limit=10)
+
+    assert len(leads) == 1
+    assert "terraform" in leads[0].tags
+
+
+def test_contra_startup_company_falls_back_to_the_title_suffix(monkeypatch):
+    """NoDesk entries carry no ``author``: 9 of 10 live leads said ``Company: unknown``
+    while the name sat in the title all along."""
+    entries = [
+        _rss_entry(
+            id="nodesk-5",
+            link="https://nodesk.co/remote-jobs/5",
+            title="Site Reliability Engineer at Sticker Mule",
+            summary="Kubernetes on AWS.",
+            author=None,
+        )
+    ]
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(entries))
+    leads = ContraStartupSource(feeds=["https://nodesk/feed"]).fetch(limit=10)
+
+    assert leads[0].company == "Sticker Mule"
+
+
+def test_contra_startup_prefers_a_real_author_over_the_title_guess(monkeypatch):
+    """Remotive's feed does populate ``author``; the parsed suffix is only a fallback."""
+    entries = [
+        _rss_entry(
+            id="remotive-6",
+            link="https://remotive.com/jobs/6",
+            title="DevOps Engineer at our client",
+            summary="Terraform + Kubernetes.",
+            author="PlatformCo",
+        )
+    ]
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(entries))
+    assert ContraStartupSource(feeds=["https://x/feed"]).fetch()[0].company == "PlatformCo"
+
+
+def test_contra_startup_strips_html_from_the_summary(monkeypatch):
+    """The summary becomes ``Description:`` in the qualifier prompt, and feed summaries
+    are HTML. Raw markup and entities are noise the model pays tokens to read."""
+    entries = [
+        _rss_entry(
+            id="nodesk-7",
+            link="https://nodesk.co/remote-jobs/7",
+            title="Cloud Engineer",
+            summary="<p>Run <b>Kubernetes</b> &amp; Terraform. We&#x27;re remote.</p>",
+        )
+    ]
+    monkeypatch.setattr(feedparser, "parse", lambda url: FakeFeed(entries))
+    desc = ContraStartupSource(feeds=["https://x/feed"]).fetch()[0].description
+    assert "<b>" not in desc and "&amp;" not in desc and "&#x27;" not in desc
+    # Tags become a space (never nothing — that would weld two words together), so
+    # "Kubernetes" keeps its own boundaries and the keyword gate can still see it.
+    assert "Kubernetes" in desc and "& Terraform" in desc and "We're remote" in desc
+
+
 # --------------------------------------------------------------------------
 # 4. HN who-is-hiring
 # --------------------------------------------------------------------------
@@ -332,7 +439,11 @@ def test_hn_hiring_maps_matching_comments(monkeypatch):
     assert lead.external_id == "5001"
     assert lead.url == "https://news.ycombinator.com/item?id=5001"
     assert "<p>" not in lead.description  # html stripped
+    assert "&amp;" not in lead.description  # entities decoded, not just tags removed
     assert "devops" in lead.tags
+    # Header-derived, not the HN username and not a truncated first line.
+    assert lead.company == "Acme"
+    assert lead.title == "Acme — DevOps engineer"
 
 
 def test_hn_hiring_returns_empty_on_error(monkeypatch):

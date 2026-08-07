@@ -99,7 +99,9 @@ def test_hn_freelancer_keeps_seeking_freelancer_with_email(monkeypatch):
     assert lead.external_id == "9001"
     assert lead.url == "https://news.ycombinator.com/item?id=9001"
     assert "<p>" not in lead.description  # html stripped
-    assert lead.company == "SEEKING FREELANCER"  # first "|" token (best effort)
+    # NOT "SEEKING FREELANCER": that segment is the thread side, not a company, and
+    # sending it as ``Company:`` is the same defect as sending an HN username.
+    assert lead.company == "Acme Corp"
     assert "kubernetes" in lead.tags
     # the obfuscated email is recoverable for auto-outreach
     assert find_contact_email(lead) == "jobs@acmecorp.com"
@@ -129,3 +131,67 @@ def test_hn_freelancer_excludes_availability_comment(monkeypatch):
 def test_hn_freelancer_returns_empty_on_error(monkeypatch):
     _install(monkeypatch, {}, {}, fail=True)
     assert HNFreelancerSource().fetch() == []
+
+
+def test_html_entities_are_decoded_not_just_ampersands(monkeypatch):
+    """The old hand-rolled fix decoded ``&amp;`` only — 14 of 480 live entities.
+
+    HN serves comment text escaped, so the qualifier prompt was reading
+    ``We&#x27;re hiring`` and ``https:&#x2F;&#x2F;acme.com``. It is one source of
+    corruption in a five-field prompt, and it affected 48 of 50 live leads.
+    """
+    search = {"hits": [{"objectID": "9200"}]}
+    item = {
+        "id": 9200,
+        "children": [
+            {
+                "objectID": "9201",
+                "author": "acme",
+                "text": (
+                    "Acme &amp; Co | Remote<p>We&#x27;re looking to hire a Kubernetes "
+                    "contractor. Docs: https:&#x2F;&#x2F;acme.com&#x2F;jobs &quot;now&quot; "
+                    "— mail jobs@acme.com</p>"
+                ),
+            },
+        ],
+    }
+    _install(monkeypatch, search, item)
+
+    lead = HNFreelancerSource().fetch(limit=5)[0]
+    assert "&#x2F;" not in lead.description
+    assert "&#x27;" not in lead.description
+    assert "&quot;" not in lead.description
+    assert "&amp;" not in lead.description
+    assert "We're looking to hire" in lead.description
+    assert "https://acme.com/jobs" in lead.description
+    assert lead.company == "Acme & Co"
+
+
+def test_commenter_typed_brackets_survive_stripping(monkeypatch):
+    """Unescape AFTER stripping tags, or the strip eats the commenter's own text.
+
+    HN escapes angle brackets a human typed (``&lt;first&gt;@corp.com`` is a common
+    way to write an address pattern) while emitting real ``<p>`` markup of its own.
+    Unescaping first turns the human's brackets into something ``<[^>]+>`` deletes,
+    taking the rest of the line — including the address — with it.
+    """
+    search = {"hits": [{"objectID": "9300"}]}
+    item = {
+        "id": 9300,
+        "children": [
+            {
+                "objectID": "9301",
+                "author": "acme",
+                "text": (
+                    "Acme | Remote<p>We are hiring an SRE. Mail "
+                    "&lt;yourname&gt;.devops@acme.com to apply.</p>"
+                ),
+            },
+        ],
+    }
+    _install(monkeypatch, search, item)
+
+    lead = HNFreelancerSource().fetch(limit=5)[0]
+    assert "<yourname>.devops@acme.com" in lead.description
+    assert "to apply" in lead.description  # the tail was not swallowed
+    assert "<p>" not in lead.description  # HN's real markup still went

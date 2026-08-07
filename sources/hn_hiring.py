@@ -38,6 +38,7 @@ import httpx
 
 from core.schemas import Lead
 from sources._keywords import extract_tags, is_ai_infra, matches_keywords
+from sources._text import detect_company, detect_role, first_line, strip_html
 from sources.base import LeadSource, dedupe
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,6 @@ TIMEOUT = 10.0
 #: How many recent "Who is hiring?" threads to read. 2 = this month + last month,
 #: so a run on the 1st of the month is not starved by an empty new thread.
 DEFAULT_STORIES = 2
-
-_TAG_RE = re.compile(r"<[^>]+>")
 
 #: Deliberately permissive: this only *ranks* comments, it does not decide
 #: deliverability (outreach.extract does that, with validation and a DNS check).
@@ -78,13 +77,26 @@ def _priority(lead: Lead) -> tuple[int, int]:
     return (1 if _has_contact_hint(text) else 0, 1 if is_ai_infra(text) else 0)
 
 
-def _strip_html(text: str) -> str:
-    return _TAG_RE.sub(" ", text or "").strip()
+def _title_for(text: str) -> str:
+    """The Title field the qualifier prompt will read.
 
+    HN who-is-hiring headers follow a pipe convention — ``Company | Role |
+    Location | Type`` — but the old code sent ``first_line(text)`` truncated at
+    117 characters, and 46 of 50 live titles on 2026-08-07 therefore ended in
+    ``...`` with the role clipped off entirely::
 
-def _first_line(text: str) -> str:
-    line = text.strip().splitlines()[0] if text.strip() else ""
-    return (line[:117] + "...") if len(line) > 120 else line
+        'Snout  https:&#x2F;&#x2F;snout.com&#x2F;  | Multiple Engineering +
+         Product Roles | Remote US or Ontario, Canada | Ful...'
+
+    ``Company — Role`` is what a human would call that post. Many comments ignore
+    the convention, so an undetectable role falls back to the old first line
+    rather than to a guess: a location in the Title field would score no better
+    than a truncation, and would be harder to notice.
+    """
+    company, role = detect_company(text), detect_role(text)
+    if company and role:
+        return first_line(f"{company} — {role}")
+    return first_line(role or text)
 
 
 class HNWhoIsHiringSource(LeadSource):
@@ -95,6 +107,12 @@ class HNWhoIsHiringSource(LeadSource):
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.stories = max(1, stories)
+        #: Last transport/HTTP failure, or None if every request succeeded. Read by
+        #: the funnel report so "Algolia rejected us" is not reported as "no jobs
+        #: matched": a swallowed 500 and a genuinely quiet thread both returned [] and
+        #: both surfaced as ``dead: fetched nothing``, which names the wrong lever —
+        #: one needs a code fix, the other needs different queries.
+        self.last_error: str | None = None
 
     def _find_story_ids(self, client: httpx.Client) -> list[str]:
         """Newest-first story IDs for the most recent who-is-hiring threads."""
@@ -111,6 +129,7 @@ class HNWhoIsHiringSource(LeadSource):
             hits = resp.json().get("hits", [])
         except Exception as exc:
             logger.warning("hn_hiring: story search failed: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return []
         return [str(h.get("objectID")) for h in hits if h.get("objectID")]
 
@@ -126,10 +145,11 @@ class HNWhoIsHiringSource(LeadSource):
             return resp.json()
         except Exception as exc:
             logger.warning("hn_hiring: item fetch failed: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return None
 
     def _comment_to_lead(self, comment: dict) -> Lead | None:
-        text = _strip_html(comment.get("text") or "")
+        text = strip_html(comment.get("text") or "")
         if not text or not matches_keywords(text):
             return None
         object_id = comment.get("objectID") or comment.get("id")
@@ -139,10 +159,15 @@ class HNWhoIsHiringSource(LeadSource):
         return Lead(
             source=self.name,
             external_id=object_id,
-            title=_first_line(text) or "HN who-is-hiring post",
+            title=_title_for(text) or "HN who-is-hiring post",
             description=text,
             url=f"{HN_ITEM_URL}{object_id}",
-            company=comment.get("author"),
+            # The header's company, not the HN account that typed it. ``author``
+            # made the prompt say ``Company: kcartmell`` for 50 of 50 live leads,
+            # and the researcher agent then went looking for a company by that
+            # name. It stays only as a last resort, because a lead with no company
+            # at all is still worth scoring on its description.
+            company=detect_company(text) or comment.get("author"),
             posted_at=comment.get("created_at"),
             tags=extract_tags(text),
             raw=comment,
@@ -169,6 +194,10 @@ class HNWhoIsHiringSource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         candidates: list[Lead] = []
+        # Per-fetch, so a source that recovers stops reporting a stale error. Without
+        # the reset one bad run marks the feed ``broken`` forever, which is the mirror
+        # of the bug last_error exists to fix.
+        self.last_error = None
         try:
             with httpx.Client(
                 headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
@@ -179,6 +208,7 @@ class HNWhoIsHiringSource(LeadSource):
                 stories = [self._fetch_story(client, sid) for sid in story_ids]
         except Exception as exc:  # pragma: no cover
             logger.warning("hn_hiring: client error: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return []
 
         for story in stories:

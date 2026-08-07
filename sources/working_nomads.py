@@ -35,6 +35,12 @@ class WorkingNomadsSource(LeadSource):
 
     def __init__(self, endpoint: str = WORKING_NOMADS_ENDPOINT) -> None:
         self.endpoint = endpoint
+        #: Last transport/HTTP failure, or None if the fetch succeeded. Read by the
+        #: funnel report so "the API rejected us" is not reported as "no jobs
+        #: matched": a swallowed 500 and a genuinely empty market both returned []
+        #: and both surfaced as ``dead: fetched nothing``, which names the wrong
+        #: lever — one needs a code fix, the other needs different queries.
+        self.last_error: str | None = None
 
     def _job_to_lead(self, job: dict) -> Lead | None:
         url = str(job.get("url") or "")
@@ -57,6 +63,7 @@ class WorkingNomadsSource(LeadSource):
         )
 
     def fetch(self, limit: int = 50) -> list[Lead]:
+        self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
         try:
             resp = httpx.get(
                 self.endpoint, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
@@ -65,9 +72,14 @@ class WorkingNomadsSource(LeadSource):
             jobs = resp.json()
         except Exception as exc:
             logger.warning("working_nomads: fetch failed: %s", exc)
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return []
 
         if not isinstance(jobs, list):
+            # A dict here means the endpoint answered with an error document, not a
+            # job list. Reporting that as an empty market points at the wrong lever.
+            logger.warning("working_nomads: unexpected payload type %s", type(jobs).__name__)
+            self.last_error = f"unexpected payload: {type(jobs).__name__}, expected list"
             return []
 
         leads: list[Lead] = []

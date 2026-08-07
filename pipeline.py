@@ -114,7 +114,7 @@ def _maybe_email_lead(
     return "sent" if sent else "send_failed"
 
 
-def _fit_summary(scores: list[int], threshold: int) -> dict:
+def _fit_summary(scores: list[int], threshold: int, unscored: int = 0) -> dict:
     """Summarise the run's fit-score distribution and name the likely bottleneck.
 
     ``dropped: 34`` on its own is unactionable. The two causes need opposite fixes:
@@ -124,9 +124,17 @@ def _fit_summary(scores: list[int], threshold: int) -> dict:
 
     ``near_miss`` (within 10 points of the threshold) is the number that decides
     which one it is, so it is computed here rather than left to be eyeballed.
+
+    ``unscored`` is how many new leads never reached the model. It exists because the
+    verdict "the lead mix is off-ICP; fix targeting" was being printed over a sample
+    that excluded the *best-targeted source in the mix*: leads with no contact address
+    were dropped before qualification, and the day-rate contract feed — the one built
+    for this ICP, the one carrying an actual day rate — contributed zero scores to
+    three consecutive runs. A confident verdict computed over a censored sample sends
+    you to fix targeting that is already correct, which is worse than no verdict.
     """
     if not scores:
-        return {"n": 0, "bottleneck": "no leads scored"}
+        return {"n": 0, "unscored": unscored, "bottleneck": "no leads scored"}
 
     ordered = sorted(scores)
     n = len(ordered)
@@ -144,6 +152,14 @@ def _fit_summary(scores: list[int], threshold: int) -> dict:
             f"threshold: {near_miss}/{n} scored within 10 points of {threshold}. "
             "Lowering min_fit_score is likely to help more than changing sources."
         )
+    elif unscored >= n:
+        # More leads were withheld from the model than were shown to it. Whatever this
+        # distribution says about targeting, it is not evidence about the lead mix.
+        bottleneck = (
+            f"sample: only {n} of {n + unscored} new leads were scored, so this "
+            "distribution is not evidence about targeting. Check which sources show "
+            "'email-blocked' or 'unscored' before changing queries or the threshold."
+        )
     else:
         bottleneck = (
             f"sources: 0/{n} cleared {threshold} and only {near_miss} came close. "
@@ -152,6 +168,7 @@ def _fit_summary(scores: list[int], threshold: int) -> dict:
 
     return {
         "n": n,
+        "unscored": unscored,
         "threshold": threshold,
         "min": ordered[0],
         "p50": pct(0.5),
@@ -241,12 +258,21 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             )
         elif not entry["new"]:
             entry["verdict"] = "stale: every lead already seen"
-        elif not entry["contactable"]:
-            entry["verdict"] = (
-                "unreachable: leads have no email, so scoring them is wasted spend"
-            )
         elif not scores:
             entry["verdict"] = "unscored: pre-gated before reaching the model"
+        elif not entry["contactable"]:
+            # Checked AFTER the score, and worded to name the channel rather than the
+            # source. It used to be checked first, which made it unfalsifiable: leads
+            # with no contact were never scored, so ``scores`` was always empty, so this
+            # branch always won and said "scoring them is wasted spend" about a source
+            # the code had refused to score. Adzuna sells the click, so its listings
+            # carry no address by design — that makes the feed email-blocked, not bad.
+            # It is where the $208k-$249k Forward Deployed Engineer role came from.
+            best = f"best score {entry['max']}" if entry.get("max") is not None else "scored"
+            entry["verdict"] = (
+                f"email-blocked: {entry['new']} new leads, none with a contact "
+                f"({best}) — human-submit channel only"
+            )
         elif not entry.get("passed"):
             entry["verdict"] = f"off-ICP: best score {entry['max']} < {threshold}"
         else:
@@ -399,16 +425,31 @@ def run_pipeline(
                 has_contact = find_deliverable_email(lead) is not None
             except Exception as exc:  # extraction must never break the loop
                 logger.warning("contact pre-check failed for %s: %s", lead.url, exc)
+            draft_allowed = True
             if has_contact:
                 contactable += 1
                 _src(lead.source)["contactable"] += 1
             elif auto_email and settings.require_contact_before_draft:
+                # NOT ``continue``. Skipping the whole lead here skipped *qualification*
+                # too, which is the cheap Sonnet call — to save the expensive Opus ones
+                # that ``route_after_qualify`` already gates on fit score. Saving the
+                # cheap stage to protect the expensive stage is a category error, and it
+                # cost far more than it saved: a source whose leads are all uncontactable
+                # produced no scores at all, so ``_per_source_summary`` reported
+                # "unreachable: scoring them is wasted spend" — a verdict that was true
+                # only because the code had made it true. The run that surfaced a
+                # $208k-$249k Forward Deployed Engineer role recorded it as evidence to
+                # retire the feed that found it.
+                #
+                # Score it, draft nothing, and let the funnel report say which it was.
                 uncontactable_skipped += 1
                 _skip_email("no_email_pregate")
-                continue
+                draft_allowed = False
 
             try:
-                state = run_lead(lead, retriever=retriever, chat=chat)
+                state = run_lead(
+                    lead, retriever=retriever, chat=chat, draft_allowed=draft_allowed
+                )
             except BudgetExhausted:
                 budget_exhausted = True
                 logger.warning("budget exhausted at $%.4f — stopping run", tracker.usd())
@@ -510,7 +551,13 @@ def run_pipeline(
         "cost_usd": tracker.usd(),
         "budget_exhausted": budget_exhausted,
     }
-    stats["fit"] = _fit_summary(fit_scores, settings.min_fit_score)
+    # Derived, not counted: any new lead that produced no score, whatever the reason
+    # (budget exhausted mid-run, a graph error, a future pre-gate). Counting it at each
+    # skip site would mean a new skip path silently omits itself, which is how the
+    # censored-sample bug got in.
+    stats["fit"] = _fit_summary(
+        fit_scores, settings.min_fit_score, unscored=max(0, new - len(fit_scores))
+    )
     stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
 
     if notify:

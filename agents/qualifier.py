@@ -92,18 +92,77 @@ SKILLS = (
 
 
 def _system_prompt(projects: list[str]) -> str:
+    """Build the qualifier's system prompt.
+
+    Three properties of this text are load-bearing, and each replaced something that
+    measurably distorted the scores.
+
+    **The scale is anchored.** It used to give the model only "0 (no fit) to 100
+    (perfect fit)" and then a list of things to deduct for. An LLM handed an
+    unanchored range and a pile of caveats regresses to the low-middle, which is what
+    the funnel measured: p50 28, p90 58. The bands below name what each decade *is*,
+    and state that 70 is the threshold at which a human writes to the lead — the
+    number ``min_fit_score`` actually uses, which the model was never told.
+
+    **Missing information is not a deduction.** The prompt asks the model to reward
+    day-rate contract work, but only one of seven adapters populates ``budget``, so
+    the user message says ``Budget: unknown`` for nearly every lead. That made the
+    rubric asymmetric: every reason to deduct was checkable in the input and the main
+    reason to award was not. Terse board listings were capped low for being terse.
+
+    **Remote is the ICP, not the UK.** The old text said to score LOW for "on-site
+    presence outside the UK" — written when the only source was a UK feed. Sourcing
+    now spans ten country endpoints across the US, EU and ANZ, all of them queried
+    with a remote filter, so that one clause penalised every lead from the nine new
+    markets for being foreign. The deduction now applies to what actually disqualifies
+    a role: a hard on-site requirement.
+    """
     return (
         "You are a freelance-opportunity qualifier for an engineer whose skills are: "
         f"{SKILLS}. Score how well a lead fits these skills from 0 (no fit) to 100 "
-        "(perfect fit).\n"
-        "Scoring guidance:\n"
-        "- Score HIGH for contract/freelance day-rate work, and for AI-infra, AI "
-        "agent, and forward-deployed/solutions-engineering roles — these are the "
-        "target segments even when the title is unusual.\n"
-        "- Score LOW for roles that only mention this tech in passing (a frontend "
-        "job whose stack list happens to include Kubernetes), for non-engineering "
-        "'agent' roles (customer service, insurance, estate agents), and for roles "
-        "requiring on-site presence outside the UK.\n"
+        "(perfect fit).\n\n"
+        "Anchor the scale. 70 is the action threshold: at or above 70 the engineer "
+        "will personally write to this lead. Score 70+ when you would advise that, "
+        "and do not withhold it from a lead that deserves it.\n"
+        "  90-100  Dead centre. A contract/day-rate engagement, or an FDE/solutions "
+        "role, whose core deliverable IS one of the skills above: running LLM "
+        "inference or a RAG system in production, building an agent platform, "
+        "hardening a Kubernetes/CI-CD platform, deploying an AI product inside a "
+        "customer's stack.\n"
+        "  75-89   Strong. The role's main axis is one of these skills, but something "
+        "is off-axis: permanent rather than contract, a seniority or scope mismatch, "
+        "or one named technology the engineer has not used. A 'Senior AI Engineer' "
+        "building LLM/RAG features, or a 'Senior Platform/SRE' role on Kubernetes and "
+        "Terraform, belongs HERE.\n"
+        "  60-74   Real overlap, secondary. Adjacent engineering where these skills "
+        "are about half the job.\n"
+        "  40-59   Weak. Engineering, and the tech appears, but it is not what the "
+        "role is for.\n"
+        "  20-39   Mostly irrelevant, or a diffuse multi-role posting where no single "
+        "listed role fits.\n"
+        "  0-19    Not applicable: non-engineering, or a non-technical 'agent' role "
+        "(customer service, insurance, estate agents).\n\n"
+        "Further guidance:\n"
+        "- Score HIGH for AI-infra, AI-agent, and forward-deployed/solutions-"
+        "engineering roles — these are the target segments even when the title is "
+        "unusual.\n"
+        "- Missing information is NOT a negative. Most of these feeds publish no "
+        "budget at all. When Budget is 'unknown', or the description omits scope, "
+        "terms or duration, score the ROLE on the evidence present and do not deduct "
+        "for the gap. 'Budget: unknown' is the normal case and must never cap a score.\n"
+        "- Contract framing is a bonus, not a requirement. Day-rate or freelance "
+        "framing adds to the score; permanent or full-time framing does NOT subtract, "
+        "because these segments hire permanently and contract-to-hire, and the "
+        "engineer's proof transfers either way.\n"
+        "- Location: the engineer works REMOTELY and the pipeline sources remote "
+        "roles worldwide. Deduct only when a role REQUIRES on-site attendance. "
+        "'Remote', 'Remote US', 'hybrid', or an unstated location is not a deduction, "
+        "and neither is the country.\n"
+        "- Score the strongest SINGLE role in the posting. Some listings (Hacker News "
+        "'who is hiring' comments) advertise several roles at once; judge the best-"
+        "fitting one, not the average.\n"
+        "- Still score LOW for roles that only mention this tech in passing — a "
+        "frontend job whose stack list happens to include Kubernetes.\n\n"
         "Give short concrete reasons and list which of the user's portfolio repos "
         f"prove the fit. Valid repos: {', '.join(projects)}. "
         "Only list repos that are genuinely relevant."
@@ -113,23 +172,56 @@ def _system_prompt(projects: list[str]) -> str:
 _SYSTEM = _system_prompt(PORTFOLIO_PROJECTS)
 
 
+def _format_evidence(chunks: list[dict[str, Any]]) -> str:
+    if not chunks:
+        return "(none retrieved)"
+    return "\n".join(f"- {c.get('text', '')} [{c.get('source', '')}]" for c in chunks)
+
+
 def qualify(lead: Lead, retriever: Any = None, chat: Any = None) -> ScoredLead:
     """Score ``lead`` and return a :class:`ScoredLead`.
 
-    ``retriever`` is accepted for interface symmetry (unused here). ``chat`` lets
-    tests inject a ``FakeChat`` so no API key is needed.
+    ``chat`` lets tests inject a ``FakeChat`` so no API key is needed.
+
+    ``retriever`` was previously accepted and then **discarded** — the docstring said
+    "for interface symmetry (unused here)" while ``build_graph`` dutifully passed one
+    in. So the model was asked to judge *fit* while holding only one side of the
+    comparison: a bare list of repo *names*. It could not know that
+    ``rag-platform-k8s`` is a production RAG-on-Kubernetes build, so a lead asking for
+    exactly that got no lift. Both downstream agents that write prose already retrieve
+    real chunks (``proposal_writer``, ``outreach.pitch``); the one agent whose entire
+    job is comparison was the one working from names. Retrieval failure is non-fatal:
+    a missing KB should score a lead conservatively, not crash the run.
     """
     settings = get_settings()
     model = get_chat(settings.model_sonnet, chat=chat)
     structured = model.with_structured_output(ScoredLead)
 
     projects = portfolio_projects()
+
+    if retriever is None:
+        try:
+            from rag.retriever import get_retriever  # lazy: keeps module import-safe
+
+            retriever = get_retriever()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("qualifier: no retriever available (%s)", exc)
+    evidence: list[dict[str, Any]] = []
+    if retriever is not None:
+        try:
+            query = f"{lead.title} {' '.join(lead.tags)}"
+            evidence = retriever.retrieve(query, 3) or []
+        except Exception as exc:  # retrieval must never fail a run
+            logger.warning("qualifier: portfolio retrieval failed (%s)", exc)
+
     text = (
         f"Title: {lead.title}\n"
         f"Company: {lead.company or 'unknown'}\n"
         f"Budget: {lead.budget or 'unknown'}\n"
         f"Tags: {', '.join(lead.tags)}\n"
-        f"Description:\n{lead.description}"
+        f"Description:\n{lead.description}\n\n"
+        "Portfolio evidence (what the engineer has actually built — judge fit "
+        f"against this, not against the repo names alone):\n{_format_evidence(evidence)}"
     )
     messages = [
         {"role": "system", "content": _system_prompt(projects)},

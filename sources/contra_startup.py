@@ -26,7 +26,8 @@ import logging
 import feedparser
 
 from core.schemas import Lead
-from sources._keywords import extract_tags
+from sources._keywords import extract_tags, matches_keywords
+from sources._text import company_from_title, strip_html
 from sources.base import LeadSource, dedupe
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,12 @@ class ContraStartupSource(LeadSource):
         else:
             env = _env_feeds()
             self.feeds = env if env else list(DEFAULT_FEEDS)
+        #: Last feed-parse failure, or None if every feed parsed. Read by the funnel
+        #: report so "the feed is gone" is not reported as "no jobs matched": a
+        #: swallowed error and a genuinely empty market both returned [] and both
+        #: surfaced as ``dead: fetched nothing``, which names the wrong lever — one
+        #: needs a code fix, the other needs different feeds.
+        self.last_error: str | None = None
 
     def _entry_to_lead(self, entry: object) -> Lead | None:
         get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
@@ -75,30 +82,51 @@ class ContraStartupSource(LeadSource):
             if not link:
                 return None
             external_id = hashlib.sha1(link.encode("utf-8")).hexdigest()
-        title = get("title", "") or ""
-        summary = get("summary", "") or get("description", "") or ""
-        author = get("author", None)
+        title = (get("title", "") or "").strip()
+        summary = strip_html(get("summary", "") or get("description", "") or "")
+        # Keyword gate, as every sibling adapter has (working_nomads.py, jobicy.py,
+        # contract_jobs.py). This adapter had none, and its NoDesk feed is scoped to
+        # "engineering", not to DevOps: live leads on 2026-08-07 included "Senior
+        # React Native Developer" and "Software engineer at Sticker Mule", each
+        # costing a Claude call to score 28 and be discarded. The gate reads title and
+        # description together, like the siblings, so a genuine infra role that names
+        # its stack only in the body still passes.
+        if not matches_keywords(title, summary):
+            return None
         return Lead(
             source=self.name,
             external_id=str(external_id),
-            title=title.strip(),
+            title=title,
             description=summary,
             url=link,
-            company=author,
+            # NoDesk entries carry no ``author``, so 9 of 10 live leads reached the
+            # scorer as ``Company: unknown`` while the name sat in the title
+            # ("Software engineer at Sticker Mule").
+            company=get("author", None) or company_from_title(title),
             posted_at=get("published", None) or get("updated", None),
             tags=extract_tags(title, summary),
             raw=dict(entry) if hasattr(entry, "keys") else {},
         )
 
     def fetch(self, limit: int = 50) -> list[Lead]:
+        self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
         leads: list[Lead] = []
         for feed_url in self.feeds:
             if len(leads) >= limit:
                 break
             try:
                 parsed = feedparser.parse(feed_url)
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 logger.warning("contra_startup: parse failed for %s: %s", feed_url, exc)
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                continue
+            # feedparser does not raise on an HTTP error — it returns an empty feed
+            # with ``status``/``bozo`` set, so a 500 or a moved feed looked exactly
+            # like "this board has no infra jobs this week" in the funnel report.
+            status = getattr(parsed, "status", None)
+            if isinstance(status, int) and status >= 400:
+                logger.warning("contra_startup: HTTP %s for %s", status, feed_url)
+                self.last_error = f"HTTP {status}: {feed_url}"
                 continue
             for entry in getattr(parsed, "entries", []) or []:
                 if len(leads) >= limit:
