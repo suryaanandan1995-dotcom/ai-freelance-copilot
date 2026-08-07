@@ -103,7 +103,7 @@ gh run watch --repo $R
 | `COPILOT_OUTREACH_MIN_FIT` | `80` | Only email leads scoring at/above this. |
 | `COPILOT_MIN_FIT_SCORE` | `70` | Leads below this are dropped entirely. |
 | `COPILOT_MAX_PROPOSALS_PER_DAY` | `15` | Anti-spam cap on drafts. |
-| `COPILOT_MAX_USD_PER_RUN` | `2.0` | Hard Claude-spend ceiling per run. |
+| `COPILOT_MAX_USD_PER_RUN` | `5.0` | Hard Claude-spend ceiling per run (~$3.29 buys a full 200-lead run at the measured $0.016428/lead). |
 | `COPILOT_OPT_OUT_MAILBOX` | *(owner email)* | Where "unsubscribe" replies go. |
 
 **Cheaper:** set the proposal writer to Sonnet by exporting
