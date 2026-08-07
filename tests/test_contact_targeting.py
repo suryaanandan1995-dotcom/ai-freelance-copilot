@@ -368,3 +368,206 @@ def test_a_placeholder_never_outranks_a_real_address_in_the_same_post():
         "with me directly via first.last@grafana.com"
     )
     assert _best_email_in(text) == "careers@grafana.com"
+
+
+# --------------------------------------------------------------------------- #
+# 4. the prose, not the local-part
+#
+# The premise of sections 1-3 was that the gate was too STRICT. Measured across ~430
+# live listings it is the opposite: of ~31 addresses the gate ACCEPTED, only 6 were
+# genuine hiring contacts and just 2 of those were on engineering roles. The rest were
+# accommodations desks, fraud-report inboxes and legal/ATS routing.
+#
+# _is_hiring_local() returning True short-circuits every other check, so a
+# hiring-flavoured local-part was *guaranteed* to pass however the prose described it.
+# These tests are verbatim from the 2026-08-07 fetch.
+# --------------------------------------------------------------------------- #
+def test_a_hiring_stemmed_address_published_as_an_accommodations_desk_is_rejected():
+    """``recruiting@ppg.com``, verbatim. The single most important case here.
+
+    Nothing about the local-part is wrong — ``recruiting`` is in ``_HIRING_STEMS`` and
+    should be. Only the sentence reveals it is a disability-adjustment desk, and before
+    this check the hiring stem won outright, so this address was not merely accepted:
+    it was ranked top.
+    """
+    jd = (
+        "Cloud Platform Engineer — Remote. You will run our Kubernetes estate.\n\n"
+        "All qualified applicants will receive consideration for employment without "
+        "regard to sex, pregnancy, race, color, creed, religion, national origin, age, "
+        "disability status, marital status, veteran status, sexual orientation, gender "
+        "identity or expression.\n\nIf you need an adjustment due to a disability, "
+        "please email&nbsp;recruiting@ppg.com.\n"
+    )
+    assert find_contact_email(_lead(jd)) is None
+
+
+def test_an_ordinary_human_name_can_only_be_caught_by_the_prose():
+    """``isamoylova@mirantis.com``, verbatim — a data-rights appeal address.
+
+    This is why the fix had to be a prose classifier and not a longer reject list: the
+    local-part is a person's name, so no local-part rule could ever catch it.
+    """
+    jd = (
+        "Senior SRE, remote EU. Mirantis, Inc. may use automated decision-making "
+        "technology (ADMT) for specific employment-related decisions. You also have "
+        "the right to appeal any decisions made by ADMT by sending your request to "
+        "isamoylova@mirantis.com By submitting your resume, you consent to the "
+        "processing and storage of your personal data.\n"
+    )
+    assert find_contact_email(_lead(jd)) is None
+
+
+def test_an_address_with_an_unsolicited_resume_prohibition_is_rejected():
+    """``applicationassistance@sailpoint.com``, verbatim — and it says so itself.
+
+    The listing attaches an explicit prohibition to this very mailbox ("Any
+    unsolicited resumes sent by candidates or agencies to this email"). Ignoring a
+    stated "do not send us mail" is the least defensible send this system could make.
+    """
+    jd = (
+        "Alternative methods of applying for employment are available to individuals "
+        "unable to submit an application through this site because of a disability. "
+        "Contact applicationassistance@sailpoint.com or mail to 11120 Four Points Dr, "
+        "Austin, TX 78726, to discuss reasonable accommodations. NOTE: Any unsolicited "
+        "resumes sent by candidates or agencies to this email will not be honored.\n"
+    )
+    assert find_contact_email(_lead(jd)) is None
+
+
+@pytest.mark.parametrize(
+    ("label", "jd"),
+    [
+        (
+            "accommodations, hiring-flavoured local",
+            "If you require a reasonable accommodation to complete the application "
+            "process, contact careers@mantech.com.",
+        ),
+        (
+            "accommodations, misspelled local (one m) — prose catches what the "
+            "local-part misses",
+            "Candidates needing assistance with the application may write to "
+            "accomodations@varicent.com.",
+        ),
+        (
+            "recruitment-fraud warning",
+            "Beware of recruitment scams. We will never ask for payment or bank "
+            "details. Report fraudulent job offers to talent@tide.co.",
+        ),
+        (
+            "phishing/impersonation warning",
+            "Individuals impersonating our recruiters have been reported. Verify the "
+            "legitimacy of any offer with recruiting@cresta.ai.",
+        ),
+        (
+            "agency-vendor inbox with no hiring cue nearby",
+            "Approved staffing agency partners submit candidates via "
+            "staffingvendors@iherb.com.",
+        ),
+        (
+            "employee-only routing",
+            "Current employees should apply through the internal transfer portal or "
+            "contact hr.recruiting@modivcare.com.",
+        ),
+    ],
+)
+def test_prose_disqualified_addresses_are_rejected(label, jd):
+    assert find_contact_email(_lead(jd)) is None, label
+
+
+# --- the mirror, again: this gate must not make the market look empty ---------
+def test_a_standard_eeo_footer_does_not_disqualify_the_real_apply_address():
+    """The over-strict trap this classifier was specifically designed around.
+
+    Nearly every US job ad carries an EEO footer listing "...disability status,
+    protected veteran status...". Keying the classifier on topic words like
+    ``disability`` or ``privacy`` would therefore have rejected the legitimate
+    ``careers@`` address of most listings in the corpus — the exact failure mode this
+    module's header warns about, and one that would have looked like "the market has
+    no contactable leads" rather than like a bug.
+
+    So every pattern requires a *routing phrase*, not a subject word.
+    """
+    jd = (
+        "Senior Platform Engineer, Remote (US).\n\n"
+        "Acme is an equal opportunity employer. All qualified applicants will receive "
+        "consideration for employment without regard to race, color, religion, sex, "
+        "sexual orientation, gender identity, national origin, disability status, or "
+        "protected veteran status.\n\n"
+        + ("We run EKS, Terraform and Argo CD across three regions. " * 30)
+        + "\n\nInterested? Send your CV to careers@acme.com and we will reply.\n"
+    )
+    assert find_contact_email(_lead(jd)) == "careers@acme.com"
+
+
+def test_a_no_agencies_footer_does_not_disqualify_the_apply_address_beside_it():
+    """Why the block is two-tiered.
+
+    "No agencies" is aimed at recruitment firms, not at a contractor applying direct,
+    and UK/EU contract ads — our best-paying segment — say it constantly. A hard block
+    on that phrase would cost real leads for a warning that was never about us, so an
+    agency prohibition yields to an explicit hiring cue in the same window.
+    """
+    jd = (
+        "6-month DevOps contract, outside IR35, remote UK. No agencies. "
+        "Send your CV to hiring@acme.co.uk."
+    )
+    assert find_contact_email(_lead(jd)) == "hiring@acme.co.uk"
+
+
+def test_a_fraud_warning_far_from_the_apply_address_does_not_disqualify_it():
+    """The window is bounded for this reason: a footer warning must not reach up the
+    page and disqualify an unrelated hiring address thousands of chars above it."""
+    jd = (
+        "Staff SRE — remote. Apply by emailing jobs@acme.io with a short note.\n\n"
+        + ("We operate a multi-region Kubernetes platform on AWS. " * 60)
+        + "\n\nBeware of recruitment scams: we will never ask candidates for payment.\n"
+    )
+    assert find_contact_email(_lead(jd)) == "jobs@acme.io"
+
+
+def test_the_live_hn_addresses_all_survive_the_prose_classifier():
+    """Regression floor on reach. hn_hiring is the only source that has ever produced
+    a sent email; on the 2026-08-07 fetch all 27 of its accepted addresses survive
+    this classifier, and only the 3 non-HN ones were blocked. If a future pattern
+    starts eating direct "email me at ..." posts, this fails."""
+    for text in (
+        "Acme | Senior SRE | Remote | Full-time. Email me at dana@acme.io.",
+        "We're hiring a platform engineer. Reach out: jane [at] acme [dot] io",
+        "Backend/infra contractor wanted, 3 months. Contact founders@acme.io.",
+        "Apply here: https://acme.io/jobs or mail hiring@acme.io directly.",
+    ):
+        assert find_contact_email(_lead(text)) is not None, text
+
+
+# --------------------------------------------------------------------------- #
+# 5. the deliverability check must actually check deliverability
+# --------------------------------------------------------------------------- #
+def test_dnspython_is_a_hard_requirement_not_an_optional_extra():
+    """``outreach.extract.domain_accepts_mail`` degrades to ``socket.getaddrinfo``
+    without dnspython, and that fallback resolves **A records only**.
+
+    A mail domain is not required to publish an A record. Measured live:
+    ``agilebits.com`` publishes 7 MX records and no A record, so the fallback returned
+    "this domain cannot receive mail" for a perfectly deliverable employer address —
+    and the funnel then reported the lead as uncontactable. That is the failure class
+    this repo keeps hitting: not a missing number, a *wrong* one, which sends you
+    looking at sourcing instead of at the resolver.
+
+    dnspython was absent from requirements.txt, so every GitHub Actions run took the
+    fallback path. This test fails if it is ever demoted to an optional extra again.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    reqs = Path(__file__).resolve().parents[1] / "requirements.txt"
+    lines = [
+        ln.split("#", 1)[0].strip().lower()
+        for ln in reqs.read_text().splitlines()
+    ]
+    assert any(ln.startswith("dnspython") for ln in lines), (
+        "dnspython must be a top-level requirement — without it the MX check "
+        "silently becomes an A-record check and drops MX-only domains"
+    )
+    assert importlib.util.find_spec("dns.resolver") is not None, (
+        "dnspython is declared but not installed in this environment"
+    )

@@ -15,6 +15,14 @@ feedparser>=6.0
 httpx>=0.27
 requests>=2.31
 
+# Deliverability. NOT optional in practice, despite outreach.extract's ImportError
+# fallback: without dnspython that fallback is socket.getaddrinfo, which resolves A
+# records only and therefore reports "cannot receive mail" for every MX-only domain.
+# Measured on live employer domains: agilebits.com publishes 7 MX records and no A
+# record, so the fallback silently dropped a contactable lead and the funnel reported
+# it as uncontactable — a wrong number, not a missing one. 1 of 24 domains checked.
+dnspython>=2.6
+
 # API + dashboard
 fastapi>=0.110
 uvicorn>=0.29
