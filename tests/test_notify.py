@@ -357,3 +357,40 @@ def test_digest_still_sends_when_kpis_are_unavailable(monkeypatch):
 
     monkeypatch.setattr(notify, "_kpi_block", lambda: "")
     assert notify.send_digest(_stats(), _top()) is True
+
+
+def test_a_source_that_scores_well_but_queues_nothing_is_not_buried(monkeypatch):
+    """`no-output` must outrank `email-blocked`, and it had no entry in the rank map.
+
+    Unlisted verdicts fall to the default rank 9, which is BELOW email-blocked (7) —
+    i.e. dead last, where the eye reads "nothing to do here". `no-output` means the
+    opposite: the source scored well and still delivered nothing, so something between
+    the score and the queue is eating its leads. Measured live on remote_boards
+    (run 31172835060): 8 of 22 scores cleared 70, 0 queued.
+    """
+    _email_settings(monkeypatch)
+    rows = dict(_by_source())
+    rows["remote_boards"] = {
+        "fetched": 68, "considered": 44, "new": 22, "contactable": 1, "queued": 0,
+        "verdict": (
+            "no-output: 0 queued, though 8 of 22 scores cleared 70 (1/22 contactable) "
+            "— clearing the bar is not output"
+        ),
+    }
+    rows["contract_jobs"] = {
+        "fetched": 46, "considered": 44, "new": 27, "contactable": 0, "queued": 0,
+        "verdict": (
+            "email-blocked: 27 new leads, none with a contact (best score 82) "
+            "— human-submit channel only"
+        ),
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    # Above the routing note, and above the source that is simply working.
+    assert body.index("remote_boards") < body.index("contract_jobs")
+    assert body.index("remote_boards") < body.index("hn_hiring")
+    # But still below the verdicts that name their own cause.
+    assert body.index("uk_contract") < body.index("remote_boards")
+    assert body.index("jobicy") < body.index("remote_boards")

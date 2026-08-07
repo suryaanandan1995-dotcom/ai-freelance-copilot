@@ -63,6 +63,12 @@ def _source_lines(stats: dict) -> list[str]:
         "stale": 3,
         "unscored": 4,
         "off-ICP": 5,
+        # "no-output" is a real finding and must not fall to the default rank 9, which
+        # would put it BELOW email-blocked — i.e. last, read as "nothing to do here".
+        # It means the opposite: the source scored well and still delivered nothing, so
+        # something between the score and the queue is eating its leads. Ranked just
+        # under off-ICP because both need a fix, but off-ICP names its own cause.
+        "no-output": 6,
         # "email-blocked" ranks LAST, below off-ICP, because it is the only verdict
         # that is not a defect: the source is working and its leads are good, they
         # just carry no address (Adzuna sells the click). Ranked as a failure it
