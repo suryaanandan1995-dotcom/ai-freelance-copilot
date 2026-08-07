@@ -60,6 +60,11 @@ def test_all_healthy_no_alert(temp_db, monkeypatch):
         "outreach_flow",
         "queue_flow",
         "contactable_supply",
+        # The inbound half. fetch_replies swallows IMAP errors and returns [], so a
+        # broken reader is indistinguishable from a quiet mailbox — and an undetected
+        # reply never stops the follow-up sequence, so the system keeps nudging people
+        # who already answered.
+        "reply_detection",
     }
 
 

@@ -190,10 +190,101 @@ def check_contactable_supply() -> dict:
     }
 
 
+def check_reply_detection_alive() -> dict:
+    """Fail when mail has gone out but the inbox has apparently never been read.
+
+    The checks above watch the OUTBOUND half of the loop. Nothing watched the inbound
+    half, and it fails in a way that is invisible by construction:
+    :func:`reply.inbox.fetch_replies` swallows every IMAP error and returns ``[]``, so
+    a wrong host, an expired app password, or a provider that simply is not the one
+    ``imap_host`` points at all produce the identical, cheerful ``inbound: 0`` with a
+    zero exit code. ``imap_host`` defaults to ``imap.gmail.com`` while the credentials
+    come from the *SMTP* settings, so pointing SMTP at any non-Gmail provider silently
+    decouples reading from sending.
+
+    Why that is worse than it sounds: a reply is what STOPS the follow-up sequence
+    (``replied is False`` is a selection criterion in ``followup.runner``). If replies
+    are never detected, nobody is ever marked replied, so the system keeps nudging
+    people who already answered — the rudest possible failure, and it looks like
+    "no one is interested" rather than like a bug.
+
+    Deliberately conservative: zero inbound is entirely normal at low volume, so this
+    only fires once enough mail has been sent that *never once* seeing a reply is
+    better explained by a broken reader than by a quiet market. It reports what it
+    cannot distinguish rather than asserting a cause.
+    """
+    from config import get_settings
+
+    settings = get_settings()
+    threshold = getattr(settings, "alert_after_sent_without_inbound", 25)
+    try:
+        sent = sum(int(s.get("emailed", 0) or 0) for s in _recent_stats(limit=60))
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": "reply_detection",
+            "ok": False,
+            "detail": f"could not read run history: {exc}",
+        }
+
+    if sent < threshold:
+        return {
+            "name": "reply_detection",
+            "ok": True,
+            "detail": (
+                f"{sent} email(s) sent so far; below the {threshold} needed to judge "
+                "whether silence is real"
+            ),
+        }
+
+    try:
+        from db.models import ReplyRecord
+        from db.session import get_session, init_db
+
+        # A missing replies table means "no data yet", not "the reader is broken".
+        # Without this the check reported ok=False on a fresh database, which is the
+        # over-alerting mirror: a check that fails before it can possibly know
+        # anything teaches you to ignore it.
+        init_db()
+        with get_session() as session:
+            inbound = (
+                session.query(ReplyRecord)
+                .filter(ReplyRecord.direction == "in")
+                .count()
+            )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": "reply_detection",
+            "ok": False,
+            "detail": f"could not read reply history: {exc}",
+        }
+
+    if inbound == 0:
+        imap = getattr(settings, "imap_host", "") or "(unset)"
+        return {
+            "name": "reply_detection",
+            "ok": False,
+            "detail": (
+                f"{sent} emails sent, 0 inbound messages ever recorded. Either nobody "
+                f"has replied, or the IMAP reader is failing silently — fetch_replies "
+                f"swallows IMAP errors and returns [] either way. Verify imap_host "
+                f"({imap}) matches the SMTP provider the credentials belong to, since "
+                "the reader logs in with smtp_user/smtp_password. Until an inbound "
+                "message is seen, nobody is marked replied and follow-ups will keep "
+                "nudging prospects who already answered."
+            ),
+        }
+    return {
+        "name": "reply_detection",
+        "ok": True,
+        "detail": f"{inbound} inbound message(s) recorded across {sent} sent",
+    }
+
+
 def funnel_checks() -> list[dict]:
     """All funnel-health checks, shaped like ``monitor.doctor`` checks."""
     return [
         check_contactable_supply(),
         check_queue_stalled(),
         check_outreach_stalled(),
+        check_reply_detection_alive(),
     ]
