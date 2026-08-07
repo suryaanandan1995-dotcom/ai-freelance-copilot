@@ -67,7 +67,7 @@ All sources are **read-only** — they fetch public listings and submit nothing.
 
 | Source | What it reads |
 |--------|---------------|
-| **HN "Who is hiring"** | The two most recent monthly Hacker News hiring threads (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. Comments are ranked by *contact-hint then AI-infra relevance* **before** the per-run limit truncates them, so the leads that survive are the ones that can actually be emailed. |
+| **HN "Who is hiring"** | The two most recent monthly Hacker News hiring threads (public Algolia API). **The main source of leads with a public contact email** — posters routinely publish "email jobs@company.com to apply", which is what makes the [auto-email outreach](#auto-email-outreach) channel possible. Comments are ranked by *contact-hint then AI-infra relevance* **before** the per-run limit truncates them, so the leads that survive are the ones that can actually be emailed. **Job seekers are excluded**: the pinned `whoishiring` account also posts a "Who wants to be hired?" thread, and Algolia's `query` is ranked relevance rather than equality, so résumés came back for this search — 5 of 60 measured leads, ranking *high* because the ranking rewards exactly what a CV has (a published address plus dense keywords). |
 | **HN "Freelancer? Seeking freelancer?"** | The companion monthly thread, where the poster is explicitly hiring a contractor. |
 | **Day-rate contract** *(optional)* | Adzuna's official jobs API across **10 country endpoints** — UK (onsite *and* remote) plus remote-only in the US, Germany, Netherlands, France, Australia, New Zealand, Switzerland, Austria and Belgium. This is the segment that actually pays day rates (£525–£550/day DevOps, **£550 median for LLM roles with vacancies up +247% YoY**), and the volume is mostly *outside* the UK: 16,223 remote contract vacancies in the US against 3,687 in the UK. Off unless you set `COPILOT_ADZUNA_APP_ID` + `COPILOT_ADZUNA_APP_KEY` (free key: [developer.adzuna.com](https://developer.adzuna.com)); returns nothing, with a log line, when unconfigured. |
 | **Remote boards** | RemoteOK, WeWorkRemotely & Remotive feeds — works out of the box, no config. |
@@ -136,7 +136,7 @@ For each freshly **queued, strong-fit** lead, it:
 **Every guardrail is on by default:**
 
 - **Master gate** — nothing sends unless `COPILOT_AUTO_EMAIL=true` *and* `COPILOT_SMTP_HOST` is set. The sender is a hard no-op otherwise, so the default config can never email anyone.
-- **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **70**) are contacted. It shipped at **80** and *no production run has ever scored a lead above 78* (measured maxima: 78, 72, 52), so the send path was closed by arithmetic: the pipeline paid Opus prices to draft a proposal, logged `queued: 1`, then discarded it as `low_fit` — and reported the run a success. That is this repo's signature defect, a gate that cannot pass for the reason it exists, and it is why 24 consecutive green runs emailed nobody. The floor is now pinned to `min_fit_score` by [`tests/test_thresholds.py`](tests/test_thresholds.py): **a lead good enough to draft is good enough to send**, since the draft is the expensive half. It is deliberately *not* lower — measured fit p50 is 28 and p90 is 58, and the floor still has to exclude those, because sender reputation is the one asset cold outreach cannot rebuy.
+- **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **70**) are contacted. It shipped at **80**, a bar **no run had ever cleared once**, so the send path was closed by arithmetic: (the first version of this line claimed 78 was the highest score the scorer could produce — that was wrong, and instructively so. 78 was the max of the three most recent *aggregates*, the only numbers left in the CI logs; the July run in `copilot.db` records 13 leads scoring **72–88**. Pinning a ceiling to that stale sample would have made the test the next gate fighting the product, so the assertion is the domain bound instead.) the pipeline paid Opus prices to draft a proposal, logged `queued: 1`, then discarded it as `low_fit` — and reported the run a success. That is this repo's signature defect, a gate that cannot pass for the reason it exists, and it is why 24 consecutive green runs emailed nobody. The floor is now pinned to `min_fit_score` by [`tests/test_thresholds.py`](tests/test_thresholds.py): **a lead good enough to draft is good enough to send**, since the draft is the expensive half. It is deliberately *not* lower — measured fit p50 is 28 and p90 is 58, and the floor still has to exclude those, because sender reputation is the one asset cold outreach cannot rebuy.
 - **Daily cap** — at most `COPILOT_MAX_EMAILS_PER_DAY` sends per UTC day (code default **20**; the shipped [`.env.example`](.env.example) sets **8**). Low volume protects reply quality, domain reputation, and legality. The cap is counted **across every channel** ([`outreach/quota.py`](outreach/quota.py)) — cold emails and follow-ups draw on one budget, because a sending domain's reputation isn't a property of the code path that used it.
 - **Dedupe** — the `outreach` table has a **UNIQUE** email column; an address is **never emailed twice**, across runs.
 - **Suppression list** — `data/suppressed.txt` (one lowercased email per line) is honored before every send. Drop an address in there to permanently stop emailing it.
@@ -194,7 +194,7 @@ Run it: `python main.py dashboard` → `http://localhost:8000`. The same data is
 
 ## Cost Guardrail
 
-Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$2.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
+Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$5.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
 
 ## Outcome Reporting
 
@@ -262,6 +262,7 @@ The verdicts are deliberately distinct failures, not severity grades:
 | `stale` | fetched only leads already in the DB | widen the query, or retire it |
 | `unscored` | pre-gated before reaching the model | check the pre-gates |
 | `off-ICP` | scored, none cleared the bar | re-target, or lower the bar |
+| `no-output` | scores cleared the bar, nothing queued | look between score and queue: contacts, `max_proposals_per_day`, the run budget |
 | `email-blocked` | good leads, none carry an address | nothing — use the human-submit queue |
 
 Two properties matter more than the table itself:
@@ -310,6 +311,50 @@ by the thing it is checking cannot fail.** It is the same shape as the unit test
 asserted `contract_only == 1` against a mock looser than the real server, and as a fit gate
 set above any score the scorer can emit. When a report and the code it reports on share a
 cause, the report stops being evidence.
+
+### The mirror: a verdict that flattered a source that produced nothing
+
+Fixing an under-crediting verdict immediately produced an over-crediting one, which is
+worth recording because the two look nothing alike and are the same mistake.
+
+The run after the fixes above sent the first emails in the project's life (7). It also
+reported **two** sources as `productive: 8 cleared 70` — byte-identical strings. One had
+queued all 8. The other, `remote_boards`, queued **0**: it had 1 contactable lead out of
+22. The verdict was printing `passed` (scores at or above the threshold) as though it were
+output, and clearing the bar is not output — a lead can score 90 and still be dropped for
+having no address, for hitting `max_proposals_per_day`, or because the run ran out of
+money. So the digest congratulated a feed that delivered nothing, in the same words it used
+for the one feed that delivered everything.
+
+Hence `no-output`, checked *last* so that `email-blocked` and `off-ICP` keep their more
+specific diagnoses, and a productive verdict now leads with the number it can prove:
+`productive: 8 queued, 8 of 26 scores cleared 70`.
+
+The same run also reported `bottleneck: none — leads are clearing the bar` while
+`budget_exhausted: true` — it had died on its cost ceiling at lead ~123 of 200. The scores
+really were healthy; "none" was still false, because the binding constraint was money and
+the report is the only place that could say so. A truncated run's score distribution is a
+**prefix of what the budget bought**, not a sample of the market, so budget now outranks
+every distribution verdict — including the censored-sample one.
+
+### Not every gate failure is a false negative
+
+The seeker filter in `hn_hiring` is the one defect here that was not a reporting problem.
+The HN Algolia query pins `author_whoishiring`, and that account posts three monthly
+threads with near-identical titles — "Who is hiring?", "Who wants to be hired?" and
+"Freelancer? Seeking freelancer?". `query` is *ranked relevance*, not equality, so the
+seeker thread came back too. Measured live: **5 of 60 leads were résumés**, and they ranked
+13th, 15th, 28th, 37th and 38th — high, because the ranking rewards a published address
+plus keyword density, and a CV has both in abundance. One was from an engineer describing
+himself as ex-homeless.
+
+`hn_hiring` is the only source that has ever produced a sent email, so this was live: the
+system was one scheduled run from cold-pitching freelance DevOps services to unemployed
+engineers asking for work. The employer-side override took three attempts against real
+data, and both failures are pinned as tests: bare `join` matched "Open to **join**ing
+early-stage startups", and `(?:come|to)\s+join` still matched "to **join**ing" for want of
+a word boundary. **An override that fires on the phrase it exists to exclude is worse than
+no override, because the exclusion still looks like it ran.**
 
 The `starved` verdict exists because the first version of this report **got it wrong on
 its first live run**: it counted `fetched` *after* the run cap, and `fetch_all`
@@ -442,9 +487,9 @@ All variables are prefixed `COPILOT_` (see [`.env.example`](.env.example)).
 | `ANTHROPIC_API_KEY` | _empty_ | Claude API key (live runs only). |
 | `COPILOT_MODEL_OPUS` | `claude-opus-4-8` | Strong model for drafting. |
 | `COPILOT_MODEL_SONNET` | `claude-sonnet-4-6` | Cheap model for scoring/triage. |
-| `COPILOT_MAX_USD_PER_RUN` | `2.0` | Hard Claude-spend cap per run. |
+| `COPILOT_MAX_USD_PER_RUN` | `5.0` | Hard Claude-spend cap per run. Raised from $2.00 after run `31172835060` **hit it and truncated** at lead ~123 of 200. Sized from the measured $0.016428/lead, so the ceiling can actually fund a full `MAX_LEADS_PER_RUN` run (200 x $0.016428 = $3.29) with headroom for a fully-drafting one. Weekdays-only schedule → ≤23 runs/month, so ≤$115/month worst case, ~$72 expected. |
 | `COPILOT_MIN_FIT_SCORE` | `70` | Leads below this are dropped. |
-| `COPILOT_MAX_LEADS_PER_RUN` | `200` | Max leads processed per run. Raised from 50 after a run fetched **186** leads and scored **50** while spending $0.13 of the $2.00 ceiling — the cap, not cost, was the binding constraint. |
+| `COPILOT_MAX_LEADS_PER_RUN` | `200` | Max leads processed per run. Raised from 50 after a run fetched **186** leads and scored **50**. The original justification — $0.13 of a $2.00 ceiling, so cost was not binding — **no longer holds**: removing the pre-gate `continue` means uncontactable leads are now scored, and per-lead cost went $0.0026 → **$0.016428** (6.3x). A lead cap the spend ceiling cannot fund is decorative, so `MAX_USD_PER_RUN` was raised with it. |
 | `COPILOT_MAX_PROPOSALS_PER_DAY` | `15` | Anti-spam daily draft cap. |
 | `COPILOT_DRY_RUN` / `COPILOT_ALLOW_SEND` | `true` / `false` | Safety flags — auto-send is never enabled. |
 | `COPILOT_NOTIFY_CHANNEL` | `email` | `email` · `whatsapp` · `none`. |

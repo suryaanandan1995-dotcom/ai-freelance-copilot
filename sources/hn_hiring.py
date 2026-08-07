@@ -65,6 +65,76 @@ def _has_contact_hint(text: str) -> bool:
     return bool(_EMAIL_HINT_RE.search(text or ""))
 
 
+#: Markers of a **job seeker's** post: someone advertising themselves for hire.
+#:
+#: The Algolia query pins ``author_whoishiring``, and that account posts THREE
+#: monthly threads with near-identical titles — "Who is hiring?", "Who wants to be
+#: hired?" and "Freelancer? Seeking freelancer?". A ``query`` is ranked relevance,
+#: not an equality filter, so "Ask HN: Who wants to be hired?" matches
+#: "Ask HN: Who is hiring?" well enough to be returned, and ``DEFAULT_STORIES = 2``
+#: widens the window further. Measured on the live August 2026 thread: 5 of 60
+#: leads were résumés, and they ranked 13th, 15th, 28th, 37th and 38th — HIGH,
+#: because :func:`_priority` rewards an address plus keyword density and a CV has
+#: both in abundance. One was an engineer describing himself as ex-homeless.
+#:
+#: This is the worst failure mode this pipeline has: the system would cold-pitch
+#: freelance DevOps services to unemployed engineers asking for work. It is also
+#: strictly wasted spend — a seeker has no budget and cannot hire.
+#:
+#: ``hn_freelancer`` has excluded its own SEEKING WORK side since it was written;
+#: only this adapter was missing the check, which is why the private-copy problem
+#: in ``sources/_text.py``'s note keeps recurring. The two structural markers come
+#: first because the "Who wants to be hired?" template asks for them verbatim and
+#: essentially every seeker fills them in.
+_SEEKER_RE = re.compile(
+    r"willing\s+to\s+relocate"
+    r"|r[eé]sum[eé]\s*/?\s*cv\s*:"
+    r"|seeking\s+(?:work|employment|(?:a\s+)?(?:new\s+)?(?:role|position|job))"
+    r"|(?:looking|open)\s+for\s+(?:work|(?:a\s+)?(?:new\s+)?(?:role|position|job))"
+    r"|open\s+to\s+(?:work|new\s+opportunities|joining|relocat)"
+    r"|i(?:'m|\s+am)\s+(?:currently\s+)?(?:looking|seeking|available|open\s+to)"
+    r"|my\s+(?:r[eé]sum[eé]|cv|portfolio)\b",
+    re.IGNORECASE,
+)
+
+#: Employer-side markers that OVERRIDE a seeker match. Without this the gate would
+#: be the over-strict mirror of the bug it fixes: a real job ad saying "we are
+#: looking for a Platform Engineer" or offering relocation help contains seeker
+#: phrasing, and dropping those would shrink the only source that has ever
+#: delivered an email. Checked second and allowed to win.
+_EMPLOYER_RE = re.compile(
+    r"we(?:'re|\s+are)\s+(?:hiring|looking|seeking|growing)"
+    r"|we\s+(?:need|want)\s+(?:a|an|to\s+hire)"
+    # ``join`` must be anchored to an invitation. A bare ``join`` matched "Open to
+    # JOINing early-stage startups" and let a designer's CV through the gate on live
+    # data — an employer-side override that fired on a seeker phrase is worse than no
+    # override, because it makes the exclusion look like it ran.
+    # ``\b`` after ``join`` matters: without it, "Open to JOINing early-stage
+    # startups" matched ``to\s+join`` and the override fired on a seeker phrase.
+    r"|join\b\s+(?:us|our|the\s+team)|come\s+join\b"
+    r"|apply\s+(?:to|at|here|via|now|online)"
+    r"|send\s+(?:your|us)\s+(?:cv|r[eé]sum[eé]|application)"
+    r"|our\s+(?:team|company|stack|product)"
+    r"|(?:is|are)\s+hiring"
+    r"|full[-\s]?time\s*\|"
+    r"|relocation\s+(?:assistance|support|package|provided)",
+    re.IGNORECASE,
+)
+
+
+def _is_seeker_post(text: str) -> bool:
+    """True if this comment is a candidate offering themselves, not a job ad.
+
+    Seeker markers are checked first and employer markers override them, because
+    the two costs are wildly asymmetric: keeping a seeker means cold-pitching an
+    unemployed engineer, while dropping a real ad costs one lead out of a thread
+    that yields dozens.
+    """
+    if not _SEEKER_RE.search(text or ""):
+        return False
+    return not _EMPLOYER_RE.search(text or "")
+
+
 def _priority(lead: Lead) -> tuple[int, int]:
     """Sort key (descending) deciding which leads survive ``limit``.
 
@@ -151,6 +221,11 @@ class HNWhoIsHiringSource(LeadSource):
     def _comment_to_lead(self, comment: dict) -> Lead | None:
         text = strip_html(comment.get("text") or "")
         if not text or not matches_keywords(text):
+            return None
+        if _is_seeker_post(text):
+            # A résumé, not a job ad. See _SEEKER_RE: the pinned author posts a
+            # "Who wants to be hired?" thread too, and relevance-ranked search
+            # returns it for this query.
             return None
         object_id = comment.get("objectID") or comment.get("id")
         if object_id is None:

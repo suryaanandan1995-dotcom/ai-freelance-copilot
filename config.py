@@ -65,9 +65,17 @@ class Settings(BaseSettings):
     # seven sources and considered only 50 of them — the cap, not cost, was the binding
     # constraint: that run spent $0.13 against a $2.00 ceiling, 15x headroom. The
     # newly-multi-region contract source got 9 of the 50 slots despite being the
-    # highest-quality feed. The pre-draft contact gate means an uncontactable lead
-    # costs a regex and a cached DNS lookup, not an Opus call, so a higher cap mostly
-    # buys *reach* rather than spend; the $2.00 cap still backstops it.
+    # highest-quality feed.
+    #
+    # CORRECTION (run 31172835060, 2026-08-07): this comment used to add that an
+    # uncontactable lead "costs a regex and a cached DNS lookup, not an Opus call", so a
+    # higher cap bought reach rather than spend. That stopped being true when the
+    # pre-gate `continue` was removed and uncontactable leads started being *scored*
+    # (deliberately — see require_contact_before_draft). 97 of that run's 122 scored
+    # leads were suppressed after qualification, per-lead cost went $0.0026 -> $0.016428,
+    # and the run hit its $2.00 ceiling at lead ~123 of 200. A cap of 200 is only real
+    # if the spend ceiling can fund 200 leads; see max_usd_per_run, now $5.00, and the
+    # relationship lint in tests/test_thresholds.py.
     max_leads_per_run: int = 200
     # Skip research+drafting for leads with no deliverable contact when the goal is
     # auto-email. 18 of 25 drafted proposals were thrown away at the contact step
@@ -87,7 +95,38 @@ class Settings(BaseSettings):
     alert_after_zero_queue_runs: int = 5   # consecutive runs with queued == 0
     min_contactable_per_run: int = 1       # below this, the top of funnel is broken
     max_proposals_per_day: int = 15  # anti-spam guard
-    max_usd_per_run: float = 2.0     # hard Claude-spend cap per pipeline run
+    # Hard Claude-spend cap per pipeline run. Raised 2.00 -> 5.00, sized from the run
+    # that hit the old value: run 31172835060 (2026-08-07) spent $2.004245, considered
+    # 200 leads, scored 122 of 123 new ones and then stopped — ``budget_exhausted:
+    # True`` with a lead it never reached. So the cap in *money* was binding while the
+    # cap in *leads* said 200: `max_leads_per_run` was decorative for the last 78 leads,
+    # and the run's visible output (queued 8, emailed 7) reads like a targeting problem.
+    #
+    # Arithmetic:
+    #   $2.004245 / 122 scored leads      = $0.016428 per lead
+    #   200 leads x $0.016428             = $3.29 to finish a full-cap run
+    # Headroom on top of that, because $3.29 is this run's *mix*, not the worst one:
+    # only 8 of 122 leads (6.6%) reached the Opus draft, while 25 of 122 (20.5%) were
+    # contactable. Solving 122q + 8d = $2.004245 for a draft path (Sonnet research +
+    # Opus write) costing ~5x a Sonnet qualification gives q≈$0.012, d≈$0.06; a run
+    # where the whole contactable share drafts is 200q + 41d ≈ $5.0. Hence 5.00 —
+    # 1.5x the measured full-run cost, not a round number. (`max_proposals_per_day`
+    # = 15 independently caps drafts at ~16/run, so the realistic worst case is ~$3.5.)
+    #
+    # Why per-lead cost jumped: run 31033943812 spent $0.13 over 50 considered leads =
+    # $0.0026 each, because uncontactable leads hit a `continue` before any model call.
+    # That pre-gate is gone on purpose (a source that is never scored cannot be told
+    # apart from one that scores badly), so 97 of the 122 leads in the run above were
+    # scored-then-suppressed — Sonnet spend with no draft. $0.016428 / $0.0026 = 6.3x.
+    # Any comment claiming an uncontactable lead "costs a regex and a cached DNS
+    # lookup" predates that change; it now costs a qualification.
+    #
+    # Worst case the owner is agreeing to: $5.00 per run; the schedule is weekdays
+    # 06:00 UTC (.github/workflows/outreach.yml), i.e. at most 23 runs/month, so
+    # <= $115/month worst case and ~$72/month at the measured $3.29. Still a real
+    # backstop: 2.5x the largest run ever observed, so a retry loop or a prompt
+    # regression stops the run instead of billing all night. Do not remove it.
+    max_usd_per_run: float = 5.0
 
     # --- SAFETY (do not flip without understanding platform ToS) ---
     dry_run: bool = True

@@ -42,7 +42,7 @@ from __future__ import annotations
 import pytest
 
 from core.schemas import Lead
-from outreach.extract import find_contact_email
+from outreach.extract import _best_email_in, _is_good_email, find_contact_email
 
 #: The exact addresses observed on production leads. Kept as literals rather than
 #: sanitised look-alikes so a future reader can grep the incident and find them.
@@ -315,3 +315,56 @@ def test_never_raises_on_hostile_input():
     for desc in ["@@@", "a@", "@b.com", "x" * 20000, "user@@corp..com", "@ [at] [dot]"]:
         find_contact_email(_lead(desc))  # must not raise
     find_contact_email(_lead("ok dana@corp.com", raw={"n": [None, 3, {"k": ["x@y.io"]}]}))
+
+
+# --------------------------------------------------------------------------- #
+# a template is not a mailbox
+# --------------------------------------------------------------------------- #
+def test_a_placeholder_address_pattern_is_not_a_contact():
+    """Measured live in the HN August 2026 thread: a Grafana Labs hiring manager
+    wrote "get in touch with me directly via <linkedin> or first.last@grafana.com" —
+    i.e. "work out my name and use this form". The domain is real, so it publishes MX
+    and cleared the deliverability check; the mailbox does not exist.
+
+    That makes it worse than extracting nothing: a hard bounce is precisely what
+    costs sender reputation, the one asset this system cannot rebuy.
+    """
+    for placeholder in (
+        "first.last@grafana.com",
+        "firstname.lastname@acme.com",
+        "yourname@acme.com",
+        "flast@acme.com",
+        "email@acme.com",
+    ):
+        assert not _is_good_email(placeholder), placeholder
+
+
+def test_a_real_person_whose_address_looks_like_the_template_still_passes():
+    """The mirror failure, and the reason the match is on the whole local-part.
+
+    ``john.smith@`` IS the first.last convention, filled in — the overwhelmingly
+    common shape of a real hiring manager's address. A token-wise match on
+    "first"/"last" would reject the entire convention and gut the only source that
+    has ever produced a sent email.
+    """
+    for real in (
+        "john.smith@acme.com",
+        "a.lastname@acme.com",
+        "firstenberg@acme.com",
+        "lastova@acme.com",
+        "namita@acme.com",
+    ):
+        assert _is_good_email(real), real
+
+
+def test_a_placeholder_never_outranks_a_real_address_in_the_same_post():
+    """The Grafana post's real signal was its Greenhouse links; had it also carried a
+    genuine address, ranking must not prefer the template just because it is nearer a
+    hiring cue ("get in touch with me directly")."""
+    text = (
+        "Grafana Labs | Senior Software Engineer - AI | 100% Remote. "
+        "Apply: https://job-boards.greenhouse.io/grafanalabs/jobs/6100673004 "
+        "or send your CV to careers@grafana.com. Also feel free to get in touch "
+        "with me directly via first.last@grafana.com"
+    )
+    assert _best_email_in(text) == "careers@grafana.com"

@@ -197,6 +197,45 @@ _CUE_WINDOW = 160
 
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z]+")
 
+#: Local-parts that are a **template for** an address rather than an address.
+#:
+#: Measured live: a Grafana Labs hiring manager wrote "get in touch with me directly
+#: via <linkedin> or ``first.last@grafana.com``" — meaning "work out my name and use
+#: this form". The domain is real, so it publishes MX and passed the deliverability
+#: check; the mailbox does not exist. Sending there is a guaranteed hard bounce, and
+#: hard bounces are what cost sender reputation, the one asset this system cannot
+#: rebuy — so this is a worse outcome than extracting nothing at all.
+#:
+#: Matched against the WHOLE local-part, not per token, because these are only
+#: placeholders in their exact template form. ``firstname``/``lastname`` as separate
+#: tokens is a real convention (``john.smith@``), and a person can be named Initial.
+_PLACEHOLDER_LOCALS = frozenset(
+    {
+        "first.last",
+        "firstname.lastname",
+        "first_last",
+        "firstname_lastname",
+        "firstlast",
+        "firstnamelastname",
+        "f.last",
+        "flast",
+        "first.l",
+        "name.surname",
+        "your.name",
+        "yourname",
+        "name",
+        "email",
+        "address",
+        "user",
+        "username",
+        "someone",
+        "somebody",
+        "anyone",
+        "me",
+        "you",
+    }
+)
+
 # Domains/substrings that are placeholders, infra, or asset hosts — not contacts.
 _BAD_DOMAIN_SUBSTRINGS = (
     "@example.",
@@ -264,6 +303,10 @@ def _is_good_email(email: str) -> bool:
     if any(local.startswith(p) for p in _BAD_LOCAL_PREFIXES):
         return False
     if _is_non_hiring_local(local):
+        return False
+    if local in _PLACEHOLDER_LOCALS:
+        # A template, not a mailbox — and on a real domain, so the MX check passes
+        # and the bounce is guaranteed. See _PLACEHOLDER_LOCALS.
         return False
     if any(sub in email for sub in _BAD_DOMAIN_SUBSTRINGS):
         return False

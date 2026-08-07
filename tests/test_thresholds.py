@@ -13,6 +13,17 @@ this repo's history: a gate that cannot pass for the reason it exists.
    leads from seven sources and considered 50. It spent $0.13 against a $2.00
    ceiling — 15x headroom — and the best feed (contract_jobs) got 9 of the 50 slots.
 
+3. **Then the fix for (2) inverted it, and nothing noticed.** Raising
+   ``max_leads_per_run`` to 200 was justified by (2) plus the claim that an
+   uncontactable lead "costs a regex and a cached DNS lookup, not an Opus call". A
+   separate fix then removed the pre-gate ``continue`` so uncontactable leads are
+   *scored* (an unscored source cannot be told apart from a badly-scoring one), which
+   added ~97 Sonnet qualifications per run. Run 31172835060 (2026-08-07) therefore
+   spent $2.004245, stopped on the ceiling at lead ~123 of its 200 allowance, and
+   reported ``queued: 8, emailed: 7`` — a number that reads like weak targeting. Two
+   settings had come to contradict each other: the lead cap said "consider 200", the
+   spend cap could afford ~123, and neither one said so.
+
 These are lints on the *relationships between* settings, not unit tests of any one
 caller. A single setting can only be judged wrong against measurement; a pair of
 settings can be judged wrong against each other, which is what makes it testable.
@@ -20,12 +31,68 @@ settings can be judged wrong against each other, which is what makes it testable
 from __future__ import annotations
 
 from config import Settings
+from costs import _DEFAULT_PRICE, PRICING
 from optimizer import optimizer
 
 
 def _settings() -> Settings:
     """Committed defaults only — never the developer's .env."""
     return Settings(_env_file=None)
+
+
+# --------------------------------------------------------------------------- #
+# the measurement, written down so the next person can re-derive it
+# --------------------------------------------------------------------------- #
+# Run 31172835060 (2026-08-07, main): cost_usd 2.004245, budget_exhausted True,
+# 200 leads considered, 123 new, 122 scored, 1 unscored, queued 8, emailed 7,
+# uncontactable_skipped 97 (scored, then drafting suppressed — Sonnet spend only).
+#
+#   $2.004245 / 122 scored leads = $0.016428 per lead   <- blended, this run's mix
+#   200 leads x $0.016428        = $3.29 per full-cap run
+_MEASURED_RUN_USD = 2.004245
+_MEASURED_LEADS_SCORED = 122
+_MEASURED_DRAFTS = 8
+# Splitting that total into its two stages: every scored lead pays one qualification,
+# and a drafted lead additionally pays research + write. Pricing the draft path at ~5x
+# a qualification (Opus output at $25/MTok against Sonnet's $15, over a much longer
+# completion) gives  122q + 8*(5q) = 162q = $2.004245  ->  q = $0.012372,
+# draft path = $0.061860. Both are order-of-magnitude fences, not precise budgets.
+_DRAFT_PATH_MULTIPLE = 5.0
+# The scoring model's price when the run above was measured, so the numbers below can
+# be re-priced instead of re-measured. See _repricing_factor.
+_MEASURED_SCORER_PRICE = (3.0, 15.0)  # claude-sonnet-4-6, $ per MTok (input, output)
+
+
+def _repricing_factor(cfg: Settings) -> float:
+    """Scale the measurement to the models/prices configured *now*.
+
+    This is the mechanism that keeps the assertions below from being pinned to a
+    stale sample, the mistake ``test_email_gate_is_within_reach_of_the_scorer``
+    documents. A cost-per-lead figure is only meaningful next to the price list it
+    was measured against: point ``model_sonnet`` at Haiku, or edit ``costs.PRICING``
+    after a price change, and the honest funding requirement moves with it. Deriving
+    the requirement from ``PRICING`` means a recalibration in EITHER direction —
+    cheaper models or dearer ones — changes what the test demands rather than making
+    the test wrong.
+    """
+    now = PRICING.get(cfg.model_sonnet, _DEFAULT_PRICE)
+    return sum(now) / sum(_MEASURED_SCORER_PRICE)
+
+
+def _usd_per_lead(cfg: Settings) -> float:
+    """Blended cost of taking one lead through the run, at current prices."""
+    return _MEASURED_RUN_USD / _MEASURED_LEADS_SCORED * _repricing_factor(cfg)
+
+
+def _usd_per_qualification(cfg: Settings) -> float:
+    """Cost of the one call EVERY lead under the cap pays for."""
+    denominator = _MEASURED_LEADS_SCORED + _MEASURED_DRAFTS * _DRAFT_PATH_MULTIPLE
+    return _MEASURED_RUN_USD / denominator * _repricing_factor(cfg)
+
+
+def _usd_per_draft_path(cfg: Settings) -> float:
+    """Cost of qualification + research + write for one lead."""
+    return _usd_per_qualification(cfg) * (1.0 + _DRAFT_PATH_MULTIPLE)
 
 
 # --------------------------------------------------------------------------- #
@@ -125,13 +192,111 @@ def test_spend_cap_is_what_bounds_a_run():
     """The cap that should bind is the one denominated in money.
 
     Raising ``max_leads_per_run`` is only safe because ``max_usd_per_run`` is a hard
-    stop and because uncontactable leads are dropped *before* the expensive call
-    (``require_contact_before_draft``). If either of those is off, the run cap is
-    load-bearing again and this file's advice becomes wrong.
+    stop and because uncontactable leads never reach the *expensive* call
+    (``require_contact_before_draft`` suppresses research+write, though they are still
+    qualified). With the pre-draft gate off, every lead under the raised run cap pays
+    the Opus path and the arithmetic in the tests below understates the run by ~5x.
     """
     cfg = _settings()
     assert cfg.max_usd_per_run > 0, "no spend ceiling: the run cap is the only limit"
     assert cfg.require_contact_before_draft is True, (
         "with the pre-draft contact gate off, every lead under the raised run cap "
         "costs a research+draft call, so cost scales with the cap"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# ...and the spend cap must actually be able to pay for that run
+# --------------------------------------------------------------------------- #
+def test_spend_ceiling_can_fund_a_full_lead_cap_run():
+    """A lead cap the spend cap cannot afford is decorative.
+
+    This is defect (3) in the module docstring, as an invariant. ``max_leads_per_run``
+    is a promise about reach; ``max_usd_per_run`` is what pays for it. When the second
+    is smaller than ``cap x cost-per-lead``, the run truncates partway down the lead
+    list and *no output says so*: the funnel report sees a short, arbitrary sample of
+    scores and blames the lead mix. Run 31172835060 stopped at lead ~123 of 200 and
+    reported ``queued: 8`` — indistinguishable from bad targeting.
+
+    Note what is asserted and what is not. The bound is derived (cap x measured
+    cost-per-lead, re-priced through ``costs.PRICING``), so lowering the lead cap,
+    switching to a cheaper scorer, or raising the ceiling all satisfy it, and only a
+    *contradiction between two settings* fails it. Hardcoding "must be >= 3.29" would
+    have been the same mistake as pinning the fit gate to a stale maximum: it would
+    fail the next honest recalibration in either direction.
+    """
+    cfg = _settings()
+    needed = cfg.max_leads_per_run * _usd_per_lead(cfg)
+    assert cfg.max_usd_per_run >= needed, (
+        f"max_usd_per_run=${cfg.max_usd_per_run:.2f} cannot fund a full "
+        f"max_leads_per_run={cfg.max_leads_per_run} run at the measured "
+        f"${_usd_per_lead(cfg):.6f}/lead (needs ${needed:.2f}). The run will stop on "
+        "the budget partway down the lead list, and the report will blame targeting "
+        "for a truncated sample — exactly what run 31172835060 did. Either raise the "
+        "ceiling or lower the lead cap, but do not let them disagree."
+    )
+
+
+def test_spend_ceiling_funds_the_worst_mix_the_other_caps_allow():
+    """Cost-per-lead is a mix, so fund the mix the settings actually permit.
+
+    $0.016428/lead is blended over a run where only 8 of 122 leads reached the Opus
+    draft. A run whose leads happen to be more contactable spends more for the same
+    lead count, and the only thing bounding how many drafts a run may pay for is
+    ``max_proposals_per_day``. So the funding requirement is
+    ``cap x qualification + min(cap, daily draft cap) x draft-path`` — three settings
+    that must agree, not two. Without this, a good day is what breaks the run.
+    """
+    cfg = _settings()
+    drafts = min(cfg.max_leads_per_run, cfg.max_proposals_per_day)
+    worst = cfg.max_leads_per_run * _usd_per_qualification(cfg) + drafts * _usd_per_draft_path(cfg)
+    assert cfg.max_usd_per_run >= worst, (
+        f"max_usd_per_run=${cfg.max_usd_per_run:.2f} funds the average mix but not the "
+        f"one these settings allow: {cfg.max_leads_per_run} qualifications at "
+        f"${_usd_per_qualification(cfg):.6f} plus {drafts} draft paths at "
+        f"${_usd_per_draft_path(cfg):.6f} = ${worst:.2f}. A run with unusually "
+        "contactable leads would truncate, i.e. the funnel gets worse when the leads "
+        "get better."
+    )
+
+
+def test_spend_ceiling_is_still_a_backstop_not_a_blank_cheque():
+    """The mirror failure: a ceiling raised until it stops being a ceiling.
+
+    This is an unattended weekday job (``.github/workflows/outreach.yml``, ``0 6 * * 1-5``
+    — up to 23 runs/month), so the ceiling is the only thing standing between a retry
+    loop or a prompt regression and an overnight bill. "Raise it until the run fits" is
+    only half the fix; it must still be a small multiple of what a legitimate full run
+    costs. Expressed as a ratio to the derived worst case rather than as a dollar
+    figure, so it keeps its meaning if the lead cap or model pricing moves.
+    """
+    cfg = _settings()
+    drafts = min(cfg.max_leads_per_run, cfg.max_proposals_per_day)
+    worst = cfg.max_leads_per_run * _usd_per_qualification(cfg) + drafts * _usd_per_draft_path(cfg)
+    max_slack = 3.0
+    assert cfg.max_usd_per_run <= max_slack * worst, (
+        f"max_usd_per_run=${cfg.max_usd_per_run:.2f} is more than {max_slack:g}x the "
+        f"${worst:.2f} a legitimate full-cap run costs, so it would no longer stop a "
+        "runaway loop before it stopped mattering. An unattended scheduled job needs a "
+        "ceiling that binds on the pathological run, not just on the normal one."
+    )
+
+
+def test_monthly_worst_case_spend_is_stated_and_bounded():
+    """The number the owner is actually agreeing to is per *month*, not per run.
+
+    The per-run ceiling is the reviewable knob, but the bill is
+    ``ceiling x runs/month``. The outreach schedule is weekday-daily, so 23 runs is the
+    ceiling on run count for any month. Asserted against a deliberately generous
+    budget: this test exists to force the multiplication into view before a per-run
+    figure is raised again, not to legislate a spending level.
+    """
+    cfg = _settings()
+    runs_per_month = 23  # weekdays 06:00 UTC, worst-case month
+    monthly_worst_case = cfg.max_usd_per_run * runs_per_month
+    assert monthly_worst_case <= 150.0, (
+        f"max_usd_per_run=${cfg.max_usd_per_run:.2f} x {runs_per_month} scheduled runs "
+        f"= ${monthly_worst_case:.0f}/month worst case. That is a bill, not a "
+        "guardrail — an unattended side-project pipeline should not be able to reach "
+        "it silently. Re-derive the per-run cost before raising this."
     )
