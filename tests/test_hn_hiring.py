@@ -148,3 +148,104 @@ def test_offtopic_comment_is_still_dropped(monkeypatch):
         [{"objectID": "7002", "author": "bakery", "text": "Bakery | Pastry Chef | On-site"}],
     )
     assert HNWhoIsHiringSource().fetch(limit=10) == []
+
+
+# --------------------------------------------------------------------------- #
+# job seekers are not leads
+# --------------------------------------------------------------------------- #
+#
+# The Algolia query pins ``author_whoishiring``, and that account posts three monthly
+# threads with near-identical titles: "Who is hiring?", "Who wants to be hired?" and
+# "Freelancer? Seeking freelancer?". ``query`` is ranked relevance, not equality, so
+# the seeker thread is returned for this search. Measured on the live August 2026
+# thread: 5 of 60 leads were résumés, ranking 13th, 15th, 28th, 37th and 38th — HIGH,
+# because _priority rewards an address plus keyword density and a CV has both.
+#
+# This is the worst failure this pipeline can have: cold-pitching freelance DevOps
+# services to unemployed engineers asking for work. One measured post was from an
+# engineer describing himself as ex-homeless. It is also pure wasted spend — a seeker
+# has no budget and cannot hire.
+
+#: Verbatim shape of the measured seeker posts (the "Who wants to be hired?" template).
+SEEKER_TEXT = (
+    "Location: Dallas, TX<p>Remote: Yes<p>Willing to relocate: Yes (including "
+    "internationally)<p>Technologies: Python, LangGraph, LangChain, RAG, Kubernetes, "
+    "AWS<p>R&#x2F;sum&#x2F;CV: https:&#x2F;&#x2F;example.com<p>Email: "
+    "seeker.name@gmail.com<p>AI engineer building production LLM systems."
+)
+
+
+def test_a_job_seekers_resume_is_not_a_lead(monkeypatch):
+    _install(monkeypatch, [{"objectID": "8001", "author": "seeker", "text": SEEKER_TEXT}])
+    assert HNWhoIsHiringSource().fetch(limit=10) == []
+
+
+def test_a_seeker_post_with_no_relocation_line_is_still_caught(monkeypatch):
+    text = (
+        "I am looking for a new role in platform engineering. My CV: "
+        "https:&#x2F;&#x2F;example.com. Tech: Kubernetes, Terraform, AWS. "
+        "Reach me at seeker@gmail.com"
+    )
+    _install(monkeypatch, [{"objectID": "8002", "author": "seeker", "text": text}])
+    assert HNWhoIsHiringSource().fetch(limit=10) == []
+
+
+def test_a_real_job_ad_offering_relocation_is_kept(monkeypatch):
+    """The mirror failure, and why _EMPLOYER_RE overrides a seeker match.
+
+    A gate so strict it drops real ads would gut the only source that has ever
+    produced a sent email. "Relocation assistance" and "we are looking for" are
+    employer phrasing that overlaps the seeker vocabulary.
+    """
+    text = (
+        "Acme Corp | Senior Platform Engineer | Remote US | Full-time<p>We are "
+        "looking for an engineer to own our Kubernetes and Terraform platform. "
+        "Relocation assistance provided. Email careers@acme.com"
+    )
+    _install(monkeypatch, [{"objectID": "8003", "author": "hiringmgr", "text": text}])
+    leads = HNWhoIsHiringSource().fetch(limit=10)
+    assert len(leads) == 1
+    assert leads[0].company == "Acme Corp"
+
+
+def test_the_measured_employer_post_still_survives_the_seeker_gate(monkeypatch):
+    """Regression guard on real data: the Snout listing must be unaffected."""
+    leads = HNWhoIsHiringSource()
+    _install(monkeypatch, [{"objectID": "8004", "author": "kcartmell", "text": SNOUT_TEXT}])
+    assert len(leads.fetch(limit=10)) == 1
+
+
+def test_an_employer_override_must_not_fire_on_a_seeker_phrase(monkeypatch):
+    """Verbatim from live data, and it defeated two drafts of the override.
+
+    "Open to joining early-stage startups" contains ``join`` and ``to join``. The
+    first draft of _EMPLOYER_RE matched bare ``join``; the second matched
+    ``(?:come|to)\\s+join`` with no trailing ``\\b``, so "to JOINing" still hit. Both
+    let this designer's CV through.
+
+    An override that fires on the phrase it is supposed to exclude is worse than
+    having no override: the exclusion still *looks* like it ran. That is this repo's
+    signature defect one level down, so the exact text is pinned here.
+    """
+    text = (
+        "Hi! I am Max. I am a Design Leader with 13+ years of experience. "
+        "Interested in fintech, crypto, LLMs, AI, and complex business-technical "
+        "systems. Open to joining early-stage startups or other interesting "
+        "opportunities.<p>Location: Warsaw, Poland<p>Remote: Yes<p>Willing to "
+        "relocate: Yes<p>Dev: Ruby, Rails, Kubernetes, AWS<p>max@gmail.com"
+    )
+    _install(monkeypatch, [{"objectID": "8005", "author": "maxb", "text": text}])
+    assert HNWhoIsHiringSource().fetch(limit=10) == []
+
+
+def test_a_real_ad_inviting_you_to_join_the_team_is_kept(monkeypatch):
+    """The other side of that boundary: anchored ``join us``/``join our team`` is
+    employer phrasing and must still override, or a hiring post that happens to offer
+    relocation gets dropped."""
+    text = (
+        "Globex | Staff SRE | Remote EU<p>Come join our team building the Kubernetes "
+        "platform. Relocation assistance provided if you want to relocate. "
+        "Terraform, AWS, Go.<p>Apply: jobs@globex.com"
+    )
+    _install(monkeypatch, [{"objectID": "8006", "author": "globexhr", "text": text}])
+    assert len(HNWhoIsHiringSource().fetch(limit=10)) == 1
