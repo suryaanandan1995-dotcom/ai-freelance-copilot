@@ -73,6 +73,12 @@ class ContraStartupSource(LeadSource):
         #: surfaced as ``dead: fetched nothing``, which names the wrong lever — one
         #: needs a code fix, the other needs different feeds.
         self.last_error: str | None = None
+        #: Entries read across all feeds, before ``matches_keywords``. See
+        #: ``LeadSource.scanned``: it separates an empty feed from a rejecting filter.
+        #: Especially load-bearing here, because the NoDesk feed is scoped to
+        #: "engineering" rather than to infra, so this adapter's normal state is
+        #: reading many entries and keeping few.
+        self.scanned: int | None = None
 
     def _entry_to_lead(self, entry: object) -> Lead | None:
         get = entry.get if hasattr(entry, "get") else lambda k, d=None: getattr(entry, k, d)
@@ -110,6 +116,7 @@ class ContraStartupSource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
+        self.scanned = None  # stays None if every feed errors; promoted below per feed
         leads: list[Lead] = []
         for feed_url in self.feeds:
             if len(leads) >= limit:
@@ -128,7 +135,11 @@ class ContraStartupSource(LeadSource):
                 logger.warning("contra_startup: HTTP %s for %s", status, feed_url)
                 self.last_error = f"HTTP {status}: {feed_url}"
                 continue
-            for entry in getattr(parsed, "entries", []) or []:
+            entries = getattr(parsed, "entries", []) or []
+            # Accumulated past the error ``continue``s above, so a feed that 500s
+            # contributes nothing rather than resetting a healthy feed's count.
+            self.scanned = (self.scanned or 0) + len(entries)
+            for entry in entries:
                 if len(leads) >= limit:
                     break
                 try:

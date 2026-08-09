@@ -296,3 +296,158 @@ def test_hn_sources_last_error_is_per_fetch(monkeypatch):
         # A quiet thread: empty, but healthy — and the stale error must be gone.
         assert src.fetch() == []
         assert src.last_error is None, src.name
+
+
+# --------------------------------------------------------------------------- #
+# ...and every adapter must say how much it READ, not just why it failed
+# --------------------------------------------------------------------------- #
+# The same invariant one level down. ``last_error`` separates "the API rejected us"
+# from "nothing matched"; ``scanned`` separates "nothing matched" from "the feed was
+# empty". Without it a keyword list too narrow for the market reports as a dead source
+# and the digest advises retiring a feed that is working. The distinction has to hold on
+# the FAILURE paths too: ``scanned`` stays None there, because 0 is a real measurement
+# ("we read an empty feed") and would send the reader to the wrong lever.
+_OFF_TOPIC = {
+    "url": "https://www.workingnomads.com/jobs/copywriter-9",
+    "title": "Remote Copywriter",
+    "description": "Write blog posts about our brand.",
+    "company_name": "Initech",
+}
+
+
+def test_working_nomads_counts_what_it_read_even_when_nothing_matches(monkeypatch):
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse([_OFF_TOPIC, _OFF_TOPIC]))
+    src = WorkingNomadsSource()
+    assert src.fetch() == []
+    # Read two listings, kept none: a filter decision, not a dead feed.
+    assert src.scanned == 2
+    assert src.last_error is None
+
+
+def test_working_nomads_reports_no_count_when_the_request_fails(monkeypatch):
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse({}, status=500))
+    src = WorkingNomadsSource()
+    assert src.fetch() == []
+    # None, not 0 — the source never saw a feed, so it cannot claim an empty one.
+    assert src.scanned is None
+
+
+def test_working_nomads_reports_zero_for_a_genuinely_empty_feed(monkeypatch):
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse([]))
+    src = WorkingNomadsSource()
+    assert src.fetch() == []
+    assert src.scanned == 0
+
+
+def test_contra_startup_counts_entries_it_rejected(monkeypatch):
+    entry = {"title": "Remote Copywriter", "summary": "Write blog posts.",
+             "link": "https://nodesk.co/remote-jobs/copywriter/", "id": "c1"}
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([entry, entry]))
+    src = ContraStartupSource(feeds=["https://nodesk.co/remote-jobs/feed/"])
+    assert src.fetch() == []
+    # NoDesk is scoped to "engineering", not infra, so rejecting most entries is this
+    # adapter's normal state — and it must not read as the feed being gone.
+    assert src.scanned == 2
+
+
+def test_contra_startup_reports_no_count_when_the_feed_errors(monkeypatch):
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([], status=500))
+    src = ContraStartupSource(feeds=["https://nodesk.co/remote-jobs/feed/"])
+    assert src.fetch() == []
+    assert src.scanned is None
+    assert src.last_error and "500" in src.last_error
+
+
+def test_contra_startup_accumulates_the_count_across_feeds(monkeypatch):
+    entry = {"title": "Remote Copywriter", "summary": "Write blog posts.",
+             "link": "https://nodesk.co/remote-jobs/copywriter/", "id": "c1"}
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([entry]))
+    src = ContraStartupSource(feeds=["https://a.example/feed", "https://b.example/feed"])
+    assert src.fetch() == []
+    # Assigned rather than accumulated, one feed's count would stand in for all of them.
+    assert src.scanned == 2
+
+
+def test_contra_startup_counts_only_the_feeds_that_answered(monkeypatch):
+    """A broken feed must not reset a working feed's count, nor inflate it."""
+    entry = {"title": "Remote Copywriter", "summary": "Write blog posts.",
+             "link": "https://nodesk.co/remote-jobs/copywriter/", "id": "c1"}
+    seen: list[str] = []
+
+    def parse(url, *a, **k):
+        seen.append(url)
+        return FakeFeed([], status=500) if len(seen) == 1 else FakeFeed([entry, entry])
+
+    monkeypatch.setattr(feedparser, "parse", parse)
+    src = ContraStartupSource(feeds=["https://dead.example/feed", "https://ok.example/feed"])
+    assert src.fetch() == []
+    assert src.scanned == 2
+    assert src.last_error and "dead.example" in src.last_error
+
+
+def test_remote_boards_accumulates_the_count_across_three_boards(monkeypatch):
+    """One name, three boards — the count must cover all of them, like last_error does."""
+    remoteok = [
+        {"legal": "metadata blob, not a job"},  # RemoteOK's first element
+        {"id": 1, "position": "Remote Copywriter", "description": "Write posts.",
+         "url": "https://remoteok.com/l/1"},
+    ]
+    remotive = {"jobs": [{"id": 7, "title": "Remote Recruiter", "description": "Hire.",
+                          "url": "https://remotive.com/7"}]}
+
+    def fake_get(url, *a, **k):
+        return FakeResponse(remotive if "remotive" in str(url) else remoteok)
+
+    wwr = {"title": "Remote Designer", "summary": "Make mocks.",
+           "link": "https://weworkremotely.com/1", "id": "w1"}
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([wwr]))
+
+    src = RemoteBoardsSource()
+    assert src.fetch() == []
+    # 1 RemoteOK job (the legal blob is not a candidate) + 1 WWR + 1 Remotive.
+    assert src.scanned == 3
+
+
+def test_remote_boards_reports_no_count_when_every_board_fails(monkeypatch):
+    def boom(*a, **k):
+        raise httpx.ConnectError("no route to host")
+
+    monkeypatch.setattr(httpx, "get", boom)
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([], status=500))
+    src = RemoteBoardsSource()
+    assert src.fetch() == []
+    assert src.scanned is None
+
+
+def test_a_recovered_source_stops_reporting_a_stale_count(monkeypatch):
+    """Per-fetch reset, for the same reason last_error has one.
+
+    A count left over from a good run would describe the previous fetch, and the verdict
+    derived from it ("read 40, matched none") would be asserted about a run that read
+    nothing at all — the stale-state bug that made a one-off failure permanent.
+    """
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse([_OFF_TOPIC]))
+    src = WorkingNomadsSource()
+    src.fetch()
+    assert src.scanned == 1
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse({}, status=500))
+    assert src.fetch() == []
+    assert src.scanned is None
+
+
+def test_remote_boards_records_a_weworkremotely_http_failure(monkeypatch):
+    """feedparser does not raise on HTTP errors, so WWR needed the same guard as NoDesk.
+
+    Found by the scanned test above: a WWR 500 produced no last_error at all, so the one
+    RSS board of the three reported an outage as "no infra jobs this week" — the exact
+    bug last_error was introduced to end, still live in the board it was never applied
+    to. contra_startup had the guard; this adapter did not.
+    """
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: FakeResponse([]))
+    monkeypatch.setattr(feedparser, "parse", lambda *a, **k: FakeFeed([], status=503))
+    src = RemoteBoardsSource()
+    assert src.fetch() == []
+    assert src.last_error and "WeWorkRemotely" in src.last_error
+    assert "503" in src.last_error

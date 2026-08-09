@@ -63,6 +63,12 @@ def _source_lines(stats: dict) -> list[str]:
         "starved": 2,
         "stale": 3,
         "unscored": 4,
+        # "filtered-out" ranks with off-ICP, NOT with dead. The source reached its
+        # upstream and read a real feed; our own keyword list rejected every row. It used
+        # to report as "dead: fetched nothing", listed at rank 1 under "retire what never
+        # produces" — advice that would delete a working feed. The lever is the keyword
+        # list, which is why it sits beside the other targeting verdict.
+        "filtered-out": 5,
         "off-ICP": 5,
         # "no-output" is a real finding and must not fall to the default rank 9, which
         # would put it BELOW email-blocked — i.e. last, read as "nothing to do here".
@@ -84,7 +90,12 @@ def _source_lines(stats: dict) -> list[str]:
         return (order.get(verdict.split(":")[0], 9), item[0])
 
     return [
-        f"  {name:<16} fetched={row.get('fetched', 0):<4} "
+        # ``read`` is what the adapter looked at before its own keyword filters; "-" when
+        # the adapter doesn't report it. It is printed FIRST because it is what makes
+        # fetched=0 legible: read=13 fetched=0 is a filter decision, read=- fetched=0 is
+        # a silent upstream, and those need opposite fixes.
+        f"  {name:<16} read={row.get('scanned', '-')!s:<5} "
+        f"fetched={row.get('fetched', 0):<4} "
         f"considered={row.get('considered', row.get('fetched', 0)):<4} "
         f"new={row.get('new', 0):<4} contactable={row.get('contactable', 0):<4} "
         f"queued={row.get('queued', 0):<3} {row.get('verdict', '')}"

@@ -273,6 +273,9 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
         # reporting every source starved.
         considered = row.get("considered", fetched)
         entry = {
+            # Absent (rather than 0) when the adapter doesn't report it, so a source
+            # that never counted cannot be mistaken for one that read an empty feed.
+            **({"scanned": row["scanned"]} if row.get("scanned") is not None else {}),
             "fetched": fetched,
             "considered": considered,
             "new": row.get("new", 0),
@@ -294,7 +297,20 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             entry["error"] = error
             entry["verdict"] = f"broken: {error}"
         elif not fetched:
-            entry["verdict"] = "dead: fetched nothing"
+            # "Returned nothing" has two opposite causes and one used to answer for both.
+            # ``dead`` ranks near the top of the digest under "retire what never
+            # produces"; if the adapter in fact read a full feed and its own filters
+            # rejected every row, retiring the source is the wrong move — the filters or
+            # the keyword list are the lever. Only a source that reached its upstream and
+            # genuinely found nothing there is dead.
+            scanned = entry.get("scanned")
+            if scanned:
+                entry["verdict"] = (
+                    f"filtered-out: read {scanned} listing(s), none matched the "
+                    f"skill keywords — widen the keywords, not the sources"
+                )
+            else:
+                entry["verdict"] = "dead: fetched nothing"
         elif not considered:
             # The source worked; the run cap spent its whole budget elsewhere. Blaming
             # the source here would send you to fix a source that has nothing wrong.
@@ -454,6 +470,16 @@ def run_pipeline(
             err = getattr(source, "last_error", None)
             if err:
                 _src(getattr(source, "name", source.__class__.__name__))["error"] = err
+
+        # How many candidates each adapter actually READ, before its own keyword/side
+        # filters. Without it "the feed gave us nothing" and "the feed gave us plenty and
+        # our filters rejected all of it" were the same verdict — and the digest sorts
+        # that verdict under "retire what never produces", so it advised deleting working
+        # sources. hn_freelancer took an afternoon to clear by hand for exactly this.
+        for source in srcs:
+            scanned = getattr(source, "scanned", None)
+            if scanned is not None:
+                _src(getattr(source, "name", source.__class__.__name__))["scanned"] = scanned
 
         # ``fetched`` is counted BEFORE the run cap, so it means "what the source
         # returned" and nothing else. Counting it after made the number a function of

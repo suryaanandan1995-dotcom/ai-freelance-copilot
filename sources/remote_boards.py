@@ -58,9 +58,23 @@ class RemoteBoardsSource(LeadSource):
         #: three: the count is what says whether to look at the network or the code.
         self.last_error: str | None = None
         self._errors: list[str] = []
+        #: Listings read across all three boards, before ``matches_keywords``. See
+        #: ``LeadSource.scanned``. Accumulated for the same reason ``last_error`` is:
+        #: one board's number standing in for three would misreport which lever to
+        #: pull. RemoteOK is an all-categories feed, so a large scanned count with few
+        #: leads is this board working correctly, not a dead source.
+        self.scanned: int | None = None
+
+    def _note_scanned(self, n: int) -> None:
+        """Add a board's candidate count, promoting None -> 0 on first real payload."""
+        self.scanned = (self.scanned or 0) + n
 
     def _note_error(self, board: str, exc: Exception) -> None:
-        self._errors.append(f"{board}: {type(exc).__name__}: {exc}")
+        self._note_failure(board, f"{type(exc).__name__}: {exc}")
+
+    def _note_failure(self, board: str, detail: str) -> None:
+        """Record a failure that is not an exception (e.g. an HTTP status on a feed)."""
+        self._errors.append(f"{board}: {detail}")
         self.last_error = "; ".join(self._errors)
 
     # --- RemoteOK (JSON) ---------------------------------------------------
@@ -81,6 +95,10 @@ class RemoteBoardsSource(LeadSource):
 
         if not isinstance(data, list):
             return leads
+
+        # RemoteOK's first element is a legal blob, not a job; excluded so the count
+        # reports candidates considered rather than array length.
+        self._note_scanned(sum(1 for i in data if isinstance(i, dict) and "id" in i))
 
         for item in data:
             if len(leads) >= limit:
@@ -122,7 +140,19 @@ class RemoteBoardsSource(LeadSource):
             logger.warning("remote_boards: WWR parse failed: %s", exc)
             self._note_error("WeWorkRemotely", exc)
             return leads
-        for entry in getattr(parsed, "entries", []) or []:
+        # feedparser does NOT raise on an HTTP error — it returns an empty feed with
+        # ``status``/``bozo`` set. So a WWR outage set no last_error at all and reported
+        # as "this board has no infra jobs this week": precisely the bug last_error
+        # exists to end, still live in the one board that reads RSS. contra_startup
+        # already guards this; this adapter was missed.
+        status = getattr(parsed, "status", None)
+        if isinstance(status, int) and status >= 400:
+            logger.warning("remote_boards: WWR HTTP %s for %s", status, self.wwr_rss_url)
+            self._note_failure("WeWorkRemotely", f"HTTP {status}")
+            return leads
+        wwr_entries = getattr(parsed, "entries", []) or []
+        self._note_scanned(len(wwr_entries))
+        for entry in wwr_entries:
             if len(leads) >= limit:
                 break
 
@@ -176,6 +206,8 @@ class RemoteBoardsSource(LeadSource):
         if not isinstance(jobs, list):
             return leads
 
+        self._note_scanned(sum(1 for j in jobs if isinstance(j, dict)))
+
         for job in jobs:
             if len(leads) >= limit:
                 break
@@ -215,6 +247,9 @@ class RemoteBoardsSource(LeadSource):
         # the mirror of the bug last_error was added to fix.
         self.last_error = None
         self._errors = []
+        # None, not 0: if all three boards fail there is no candidate count to report,
+        # and 0 would assert three empty boards.
+        self.scanned = None
         leads: list[Lead] = []
         leads.extend(self._fetch_remoteok(limit))
         remaining = limit - len(leads)

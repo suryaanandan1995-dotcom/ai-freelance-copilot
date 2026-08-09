@@ -183,6 +183,11 @@ class HNWhoIsHiringSource(LeadSource):
         #: both surfaced as ``dead: fetched nothing``, which names the wrong lever —
         #: one needs a code fix, the other needs different queries.
         self.last_error: str | None = None
+        #: Comments read across every thread, at all nesting depths, before the
+        #: keyword and job-seeker filters. See ``LeadSource.scanned``. A who-is-hiring
+        #: thread runs to hundreds of comments of which a handful are infra roles, so
+        #: a high scanned count with few leads is this source working as designed.
+        self.scanned: int | None = None
 
     def _find_story_ids(self, client: httpx.Client) -> list[str]:
         """Newest-first story IDs for the most recent who-is-hiring threads."""
@@ -257,6 +262,9 @@ class HNWhoIsHiringSource(LeadSource):
         """
         if not isinstance(comment, dict):
             return
+        # Counted inside the walk, so replies nested under a top-level post are
+        # included: this is a candidate the filters saw and rejected.
+        self.scanned = (self.scanned or 0) + 1
         try:
             lead = self._comment_to_lead(comment)
         except Exception as exc:
@@ -273,6 +281,9 @@ class HNWhoIsHiringSource(LeadSource):
         # the reset one bad run marks the feed ``broken`` forever, which is the mirror
         # of the bug last_error exists to fix.
         self.last_error = None
+        # None until a thread is in hand, so 0 cannot be read as "the threads were
+        # empty" when the real event was never reaching Algolia.
+        self.scanned = None
         try:
             with httpx.Client(
                 headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT

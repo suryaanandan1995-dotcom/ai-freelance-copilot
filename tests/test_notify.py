@@ -484,3 +484,77 @@ def test_third_party_job_titles_are_escaped_in_the_html_digest():
     assert "&lt;script&gt;" in html
     assert 'onmouseover="alert(1)"' not in html
     assert "&amp;" in html
+
+
+# --------------------------------------------------------------------------- #
+# a rejecting filter is a targeting note, not a source to retire
+# --------------------------------------------------------------------------- #
+def test_a_filtered_out_source_is_not_listed_among_the_dead(monkeypatch):
+    """Ordering carries the advice, so the two cases must not share a rank.
+
+    "dead" sits at the top of the table under "retire what never produces". A source that
+    read a full feed and matched none of it needs the opposite response — widen the
+    keyword list — so it ranks with off-ICP, the other targeting verdict, below the
+    genuinely silent sources.
+    """
+    _email_settings(monkeypatch)
+    rows = dict(_by_source())
+    rows["hn_freelancer"] = {
+        "scanned": 13, "fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+        "verdict": "filtered-out: read 13 listing(s), none matched the skill keywords "
+                   "— widen the keywords, not the sources",
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    # Below the genuinely dead source, above the productive one.
+    assert body.index("uk_contract") < body.index("hn_freelancer")
+    assert body.index("hn_freelancer") < body.index("hn_hiring")
+
+
+def test_the_table_reports_how_much_each_source_read(monkeypatch):
+    """`read` is what makes fetched=0 legible.
+
+    read=13 fetched=0 is a filter decision; read=- fetched=0 is a silent upstream. Both
+    printed as fetched=0 and nothing else, so the table could not tell them apart.
+    """
+    _email_settings(monkeypatch)
+    rows = {
+        "hn_freelancer": {
+            "scanned": 13, "fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+            "verdict": "filtered-out: read 13 listing(s), none matched the skill keywords",
+        },
+        "upwork_rss": {
+            "fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+            "verdict": "dead: fetched nothing",
+        },
+    }
+
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+
+    assert "read=13" in body
+    # A source that reports no count prints a dash, not a zero that it never measured.
+    assert "read=-" in body
+
+
+def test_the_subject_does_not_call_a_filtered_source_dead(monkeypatch):
+    """`EVERY SOURCE DEAD` is a sourcing emergency; a narrow keyword list is not.
+
+    The subject is the only part guaranteed to be read, so a filter verdict misreported
+    there sends the owner to replace feeds that work.
+    """
+    _email_settings(monkeypatch)
+    rows = {
+        "hn_freelancer": {
+            "scanned": 13, "fetched": 0, "new": 0, "contactable": 0, "queued": 0,
+            "verdict": "filtered-out: read 13 listing(s), none matched the skill keywords",
+        },
+    }
+
+    notify.send_digest(
+        dict(_stats(), queued=0, emailed=0, contactable=0, by_source=rows), []
+    )
+    subject = _FakeSMTP.sent[0]["Subject"]
+    assert "DEAD" not in subject
