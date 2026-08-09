@@ -395,6 +395,16 @@ def run_pipeline(
     # at the contact step after being fully researched and written at Opus prices.
     contactable = 0
     uncontactable_skipped = 0
+    # Qualified leads that have no email, kept so the digest can hand them to the owner
+    # to apply by hand. Measured 2026-08-07: contract_jobs (the day-rate feed, the one
+    # aimed squarely at paid contract work) fetched 36 leads scoring up to 78 and
+    # produced ZERO outreach, because those listings carry an apply form and no address.
+    # They were scored at real cost and then discarded without ever being shown to
+    # anyone — the automation's dead end was silently also the owner's dead end, when
+    # applying by hand takes a minute. auto_submit stays off permanently (bot-submitting
+    # to job forms breaks platform ToS), so a human hand-off is the ONLY route these
+    # leads have, which is exactly why they must be surfaced rather than dropped.
+    apply_yourself: list[dict] = []
     # Every fit score seen this run. Without this, "dropped: 34" is unactionable:
     # a run cannot tell you whether 34 leads scored 68 (threshold too strict) or 12
     # (sources off-ICP), which are opposite fixes. Recorded so min_fit_score can be
@@ -538,6 +548,21 @@ def run_pipeline(
                 if fit_score >= settings.min_fit_score:
                     metrics.inc("leads_qualified_total")
 
+            # A qualified lead with no email is not a dead lead, it is a lead the owner
+            # applies to by hand. Captured BEFORE the disposition check below, because an
+            # uncontactable lead never reaches "queue" — that is precisely why these were
+            # invisible.
+            if not has_contact and fit_score >= settings.min_fit_score:
+                apply_yourself.append(
+                    {
+                        "title": lead.title,
+                        "url": lead.url,
+                        "company": lead.company or "",
+                        "source": lead.source,
+                        "fit_score": fit_score,
+                    }
+                )
+
             if state.get("disposition") != "queue":
                 dropped += 1
                 continue
@@ -624,6 +649,11 @@ def run_pipeline(
         "emailed_skipped": emailed_skipped,
         "cost_usd": tracker.usd(),
         "budget_exhausted": budget_exhausted,
+        # Highest-scoring first: the digest shows the top few, so ordering here decides
+        # which ones the owner actually sees.
+        "apply_yourself": sorted(
+            apply_yourself, key=lambda r: r.get("fit_score", 0), reverse=True
+        ),
     }
     # Derived, not counted: any new lead that produced no score, whatever the reason
     # (budget exhausted mid-run, a graph error, a future pre-gate). Counting it at each
