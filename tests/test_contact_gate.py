@@ -367,3 +367,69 @@ def test_pregate_can_be_disabled_by_setting(temp_db, monkeypatch):
 
     assert stats["uncontactable_skipped"] == 0
     assert stats["queued"] == 1  # drafted anyway, for human submission
+
+
+def test_a_qualified_uncontactable_lead_is_handed_to_the_owner(temp_db, monkeypatch):
+    """Scoring it is only worth the spend if someone ever sees the result.
+
+    Measured 2026-08-07: ``contract_jobs`` — the day-rate feed, the source aimed
+    squarely at paid contract work — fetched 36 leads scoring up to 78 and produced
+    zero outreach, because Adzuna listings carry an apply form and no address. The
+    previous fix made those leads *scored* instead of invisible to the funnel report,
+    which fixed the reporting; the leads themselves were still dropped at the
+    disposition check and never shown to anyone.
+
+    ``auto_submit`` is permanently off (bot-submitting to job forms breaks platform
+    ToS), so a human hand-off is the ONLY route these leads have. Applying by hand
+    takes a minute; the automation's dead end must not silently be the owner's.
+    """
+    import outreach.sender as sender
+    from pipeline import run_pipeline
+
+    monkeypatch.setattr(sender, "send_outreach", lambda to, subject, body: True)
+
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(1, "Great role. Apply on our careers page.")])],
+        retriever=FakeRetriever(),
+        chat=_email_chat(),
+        auto_email=True,
+    )
+
+    assert stats["uncontactable_skipped"] == 1
+    assert stats["queued"] == 0  # still not queued: there is nobody to email
+    handoff = stats["apply_yourself"]
+    assert len(handoff) == 1
+    assert handoff[0]["fit_score"] == 90
+    # The listing URL is the entire hand-off — there is no hosted dashboard to link to.
+    assert handoff[0]["url"] == _lead(1, "x").url
+
+
+def test_a_low_scoring_uncontactable_lead_is_not_handed_over(temp_db, monkeypatch):
+    """The hand-off must stay worth reading.
+
+    Every uncontactable lead would mean 136 entries per run, which is a list nobody
+    opens — the same way a section that always renders stops being read.
+    """
+    import config
+    import outreach.sender as sender
+    from pipeline import run_pipeline
+
+    monkeypatch.setattr(sender, "send_outreach", lambda to, subject, body: True)
+    real = config.get_settings
+
+    def strict():
+        cfg = real()
+        cfg.min_fit_score = 95  # above the fake qualifier's 90
+        return cfg
+
+    monkeypatch.setattr("pipeline.get_settings", strict)
+
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(1, "Great role. Apply on our careers page.")])],
+        retriever=FakeRetriever(),
+        chat=_email_chat(),
+        auto_email=True,
+    )
+
+    assert stats["uncontactable_skipped"] == 1
+    assert stats["apply_yourself"] == []

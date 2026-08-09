@@ -394,3 +394,93 @@ def test_a_source_that_scores_well_but_queues_nothing_is_not_buried(monkeypatch)
     # But still below the verdicts that name their own cause.
     assert body.index("uk_contract") < body.index("remote_boards")
     assert body.index("jobicy") < body.index("remote_boards")
+
+
+# --------------------------------------------------------------------------- #
+# "Apply yourself" — qualified leads with no contact address
+#
+# Measured 2026-08-07: contract_jobs (the day-rate feed, aimed squarely at paid
+# contract work) fetched 36 leads scoring up to 78 and produced ZERO outreach, because
+# those listings carry an apply form and no address. They were scored at real cost and
+# then dropped in silence. auto_submit is permanently off, so a human hand-off is the
+# ONLY route these leads have — which makes the digest the only place they can appear.
+# --------------------------------------------------------------------------- #
+def _apply_stats(n: int = 2) -> dict:
+    return {
+        "queued": 0,
+        "apply_yourself": [
+            {
+                "title": f"Contract role {i}",
+                "url": f"https://boards.example.com/job/{i}",
+                "company": f"Company {i}",
+                "source": "contract_jobs",
+                "fit_score": 80 - i,
+            }
+            for i in range(n)
+        ],
+    }
+
+
+def test_uncontactable_qualified_leads_reach_the_digest():
+    from interfaces.notify import _plaintext
+
+    text = _plaintext(_apply_stats(2), [], "http://localhost:8000")
+    assert "APPLY YOURSELF" in text
+    # The real listing URL, not a dashboard link: with no hosted UI this link IS the
+    # entire hand-off, so it has to work on its own.
+    assert "https://boards.example.com/job/0" in text
+    assert "/lead/" not in text.split("APPLY YOURSELF")[1]
+
+
+def test_the_apply_section_is_absent_when_there_is_nothing_to_apply_to():
+    """No empty scaffolding: a section that always renders stops being read."""
+    from interfaces.notify import _plaintext
+
+    text = _plaintext({"queued": 0}, [], "http://localhost:8000")
+    assert "APPLY YOURSELF" not in text
+
+
+def test_the_apply_section_says_how_many_it_is_not_showing():
+    """Truncating to 5 silently would read as "5 leads" when there were 12."""
+    from interfaces.notify import _plaintext
+
+    text = _plaintext(_apply_stats(12), [], "http://localhost:8000")
+    assert "12 qualified lead(s)" in text
+    assert "and 7 more" in text
+
+
+def test_apply_leads_are_ordered_best_fit_first():
+    """Only the top 5 are shown, so ordering decides what the owner actually sees."""
+    from interfaces.notify import _plaintext
+
+    stats = _apply_stats(3)
+    text = _plaintext(stats, [], "http://localhost:8000")
+    body = text.split("APPLY YOURSELF")[1]
+    assert body.index("[80]") < body.index("[79]") < body.index("[78]")
+
+
+def test_third_party_job_titles_are_escaped_in_the_html_digest():
+    """Titles and companies come from remote job posts.
+
+    The HTML digest is assembled by f-string concatenation, so unescaped remote text
+    in it is an injection into the owner's own inbox.
+    """
+    from interfaces.notify import _html
+
+    stats = {
+        "queued": 0,
+        "apply_yourself": [
+            {
+                "title": "<script>alert(1)</script>",
+                "url": 'https://x.example/j"onmouseover="alert(1)',
+                "company": "Acme <b>&</b> Co",
+                "source": "contract_jobs",
+                "fit_score": 77,
+            }
+        ],
+    }
+    html = _html(stats, [], "http://localhost:8000")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+    assert 'onmouseover="alert(1)"' not in html
+    assert "&amp;" in html

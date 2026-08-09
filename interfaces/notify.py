@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import smtplib
 from email.message import EmailMessage
+from html import escape
 
 from config import get_settings
 
@@ -135,6 +136,29 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
             )
     else:
         lines.append("  (nothing queued this run)")
+    # Qualified leads with no contact address. These have no automated route at all —
+    # auto_submit is permanently off — so the digest is the ONLY place they can ever
+    # appear. They used to be scored at real cost and then dropped in silence, which
+    # made the automation's dead end the owner's dead end too.
+    apply = stats.get("apply_yourself") or []
+    if apply:
+        lines += [
+            "",
+            f"APPLY YOURSELF — {len(apply)} qualified lead(s) with no email "
+            "(apply form only):",
+        ]
+        for lead in apply[:5]:
+            company = lead.get("company") or lead.get("source", "")
+            lines.append(
+                f"  - [{lead.get('fit_score', 0)}] {lead.get('title', '')}"
+                f"{f' — {company}' if company else ''}"
+            )
+            # The real listing URL, not a dashboard link: this is the one thing that
+            # has to work without any hosted UI.
+            lines.append(f"      {lead.get('url', '')}")
+        if len(apply) > 5:
+            lines.append(f"  ... and {len(apply) - 5} more (top 5 shown, best fit first)")
+
     lines += ["", "Nothing was submitted automatically — review and submit yourself."]
     return "\n".join(lines)
 
@@ -172,6 +196,28 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
         if source_lines
         else ""
     )
+
+    # Qualified leads with no email. The href is the REAL listing URL — with no hosted
+    # dashboard, this link is the entire hand-off, so it has to work on its own.
+    # Titles and companies come from third-party job posts, so they are escaped: this
+    # HTML is assembled by f-string concatenation, and unescaped remote text in it is
+    # an injection into the owner's own inbox.
+    apply_rows = ""
+    for lead in (stats.get("apply_yourself") or [])[:5]:
+        url = escape(str(lead.get("url") or ""), quote=True)
+        title = escape(str(lead.get("title") or ""))
+        company = escape(str(lead.get("company") or lead.get("source") or ""))
+        apply_rows += (
+            f"<li><strong>[{int(lead.get('fit_score', 0))}]</strong> "
+            f'<a href="{url}">{title}</a>'
+            f'{f" — {company}" if company else ""}</li>'
+        )
+    apply_html = (
+        "<h3>Apply yourself — qualified, no email (apply form only)</h3>"
+        f"<ol>{apply_rows}</ol>"
+        if apply_rows
+        else ""
+    )
     return f"""\
 <html><body style="font-family:system-ui,Arial,sans-serif">
 <h2>AI Freelance Copilot — pipeline digest</h2>
@@ -192,6 +238,7 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
 {note}
 <h3>Top leads awaiting your review</h3>
 <ol>{rows}</ol>
+{apply_html}
 <p style="color:#666">Nothing was submitted automatically — review and submit yourself.</p>
 </body></html>"""
 
