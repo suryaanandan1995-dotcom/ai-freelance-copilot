@@ -102,6 +102,9 @@ class JobicySource(LeadSource):
         #: and both surfaced as ``dead: fetched nothing``, which names the wrong
         #: lever — one needs a code fix, the other needs different queries.
         self.last_error: str | None = None
+        #: Listings read across all endpoints, before ``matches_keywords``. See
+        #: ``LeadSource.scanned``: it separates an empty feed from a rejecting filter.
+        self.scanned: int | None = None
 
     def _fetch_endpoint(self, url: str, limit: int) -> list[Lead]:
         leads: list[Lead] = []
@@ -117,6 +120,11 @@ class JobicySource(LeadSource):
         jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
         if not isinstance(jobs, list):
             return leads
+
+        # Accumulated, not assigned: one endpoint's count would silently stand in for
+        # all of them. Promoted from None only here, where a payload is genuinely in
+        # hand, so 0 keeps meaning "read an empty feed" rather than "never reached it".
+        self.scanned = (self.scanned or 0) + sum(1 for j in jobs if isinstance(j, dict))
 
         for job in jobs:
             if len(leads) >= limit:
@@ -155,6 +163,7 @@ class JobicySource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
+        self.scanned = None  # stays None if every endpoint fails; see _fetch_endpoint
         leads: list[Lead] = []
         seen: set[str] = set()
         for url in self.endpoints:

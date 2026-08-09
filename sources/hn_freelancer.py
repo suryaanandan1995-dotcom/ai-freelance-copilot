@@ -80,6 +80,11 @@ class HNFreelancerSource(LeadSource):
         #: both surfaced as ``dead: fetched nothing``, which names the wrong lever —
         #: one needs a code fix, the other needs different queries.
         self.last_error: str | None = None
+        #: Top-level comments read from the thread, before the seeking-freelancer and
+        #: keyword filters. This source's whole job is rejecting the SEEKING WORK side,
+        #: so "reached the thread, kept none" is its normal quiet month — and without
+        #: this count it is indistinguishable from never finding the thread at all.
+        self.scanned: int | None = None
 
     def _find_story_id(self, client: httpx.Client) -> str | None:
         try:
@@ -143,6 +148,9 @@ class HNFreelancerSource(LeadSource):
         # the reset one bad run marks the feed ``broken`` forever, which is the mirror
         # of the bug last_error exists to fix.
         self.last_error = None
+        # Left at None until the thread is in hand: 0 must mean "read an empty thread",
+        # not "never got there". Those are the two cases this counter exists to split.
+        self.scanned = None
         try:
             with httpx.Client(
                 headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
@@ -159,11 +167,12 @@ class HNFreelancerSource(LeadSource):
         if not story:
             return leads
 
-        for comment in story.get("children", []) or []:
+        comments = [c for c in (story.get("children", []) or []) if isinstance(c, dict)]
+        self.scanned = len(comments)
+
+        for comment in comments:
             if len(leads) >= limit:
                 break
-            if not isinstance(comment, dict):
-                continue
             try:
                 lead = self._comment_to_lead(comment)
             except Exception as exc:

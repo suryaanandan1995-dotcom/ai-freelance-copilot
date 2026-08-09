@@ -41,6 +41,9 @@ class WorkingNomadsSource(LeadSource):
         #: and both surfaced as ``dead: fetched nothing``, which names the wrong
         #: lever — one needs a code fix, the other needs different queries.
         self.last_error: str | None = None
+        #: Listings read from the feed, before ``matches_keywords``. See
+        #: ``LeadSource.scanned``: it separates an empty feed from a rejecting filter.
+        self.scanned: int | None = None
 
     def _job_to_lead(self, job: dict) -> Lead | None:
         url = str(job.get("url") or "")
@@ -64,6 +67,7 @@ class WorkingNomadsSource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
+        self.scanned = None  # stays None on the failure paths: 0 would claim an empty feed
         try:
             resp = httpx.get(
                 self.endpoint, headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT
@@ -84,6 +88,7 @@ class WorkingNomadsSource(LeadSource):
 
         leads: list[Lead] = []
         seen: set[str] = set()
+        self.scanned = sum(1 for job in jobs if isinstance(job, dict))
         for job in jobs:
             if len(leads) >= limit:
                 break

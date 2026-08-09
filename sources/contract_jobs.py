@@ -251,6 +251,12 @@ class ContractJobsSource(LeadSource):
         #: and both surfaced as ``dead: fetched nothing``, which names the wrong
         #: lever — one needs a code fix, the other needs different queries.
         self.last_error: str | None = None
+        #: Listings read across every (region, location, query) slice, before
+        #: ``matches_keywords`` and ``excluded_title``. See ``LeadSource.scanned``.
+        #: Adzuna's relevance ranking is loose — a "devops" query returns sales roles at
+        #: devops companies — so this source is expected to scan far more than it keeps,
+        #: and that is not the same event as the API rejecting the request.
+        self.scanned: int | None = None
 
     def _job_to_lead(self, job: dict, region: Region = DEFAULT_REGIONS[0]) -> Lead | None:
         job_id = job.get("id")
@@ -383,8 +389,13 @@ class ContractJobsSource(LeadSource):
             return []
 
         results = payload.get("results", []) if isinstance(payload, dict) else []
+        rows = results if isinstance(results, list) else []
+        # Accumulated per slice, and only past the ``payload is None`` return above, so
+        # rejected requests stay attributable to last_error rather than looking like an
+        # empty market.
+        self.scanned = (self.scanned or 0) + sum(1 for j in rows if isinstance(j, dict))
         leads: list[Lead] = []
-        for job in results if isinstance(results, list) else []:
+        for job in rows:
             if len(leads) >= limit:
                 break
             if not isinstance(job, dict):
@@ -425,6 +436,9 @@ class ContractJobsSource(LeadSource):
 
     def fetch(self, limit: int = 50) -> list[Lead]:
         self.last_error = None  # per-fetch, so a fixed source stops reporting stale errors
+        # Stays None when unconfigured or when every request fails: 0 would report an
+        # empty market for a source that never got to ask.
+        self.scanned = None
         app_id, app_key = _credentials()
         if not app_id or not app_key:
             self.last_error = "not configured: no Adzuna app id/key"

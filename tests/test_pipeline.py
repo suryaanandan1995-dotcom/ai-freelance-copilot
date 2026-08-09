@@ -891,3 +891,115 @@ def test_fit_summary_handles_empty_and_single():
     single = _fit_summary([73], threshold=70)
     assert single["min"] == single["max"] == single["p50"] == 73
     assert single["passed"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# a rejecting filter must not be reported as a dead source
+# --------------------------------------------------------------------------- #
+def test_a_source_whose_filters_rejected_everything_is_not_called_dead():
+    """`dead` says retire the source. Here the source worked and the filters rejected.
+
+    Both cases returned [] and both read `dead: fetched nothing`, which the digest lists
+    near the top under "retire what never produces" — so the report advised deleting a
+    feed that had reached its upstream and read a full page of listings. Establishing
+    that hn_freelancer was in this state, not dead, cost an afternoon of manual API
+    calls; `scanned` states it outright.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"hn_freelancer": {"scanned": 13, "fetched": 0, "considered": 0, "new": 0,
+                           "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    verdict = out["hn_freelancer"]["verdict"]
+    assert "dead" not in verdict
+    assert verdict.startswith("filtered-out")
+    # The count is the evidence, and the lever has to travel with the verdict.
+    assert "13" in verdict
+    assert "keywords" in verdict
+
+
+def test_a_source_that_reached_nothing_is_still_dead():
+    """The complement: `scanned` absent means the adapter never got a payload.
+
+    Without this the new branch could quietly swallow the real dead case, which is the
+    verdict that catches a source going away.
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"upwork_rss": {"fetched": 0, "considered": 0, "new": 0, "contactable": 0,
+                        "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert out["upwork_rss"]["verdict"] == "dead: fetched nothing"
+
+
+def test_reading_an_empty_feed_is_dead_not_filtered_out():
+    """scanned == 0 means the feed itself was empty: nothing was filtered.
+
+    This is why adapters leave `scanned` at None on their failure paths instead of 0 —
+    0 is a real measurement ("we read an empty feed"), not "we never looked".
+    """
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"jobicy": {"scanned": 0, "fetched": 0, "considered": 0, "new": 0,
+                    "contactable": 0, "queued": 0, "scores": []}},
+        threshold=70,
+    )
+    assert out["jobicy"]["verdict"] == "dead: fetched nothing"
+
+
+def test_an_errored_source_is_broken_even_when_it_scanned_rows():
+    """`broken` still outranks the filter verdict: a partial failure is a code fix."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"remote_boards": {"scanned": 40, "fetched": 0, "considered": 0, "new": 0,
+                           "contactable": 0, "queued": 0, "scores": [],
+                           "error": "RemoteOK: HTTPStatusError: 500"}},
+        threshold=70,
+    )
+    assert out["remote_boards"]["verdict"].startswith("broken")
+
+
+def test_a_source_reporting_no_scan_count_omits_the_field_entirely():
+    """Absent, not 0 — otherwise "didn't count" is indistinguishable from "empty feed"."""
+    from pipeline import _per_source_summary
+
+    out = _per_source_summary(
+        {"upwork_rss": {"fetched": 2, "considered": 2, "new": 2, "contactable": 2,
+                        "queued": 2, "scores": [80]}},
+        threshold=70,
+    )
+    assert "scanned" not in out["upwork_rss"]
+
+
+def test_the_scan_count_reaches_the_report_from_the_adapter():
+    """End to end: an adapter's `scanned` must survive into stats["by_source"].
+
+    The attribute existing on the adapter is worthless if run_pipeline never reads it;
+    that gap is how `last_error` sat unused before it was wired in.
+    """
+    from pipeline import run_pipeline
+
+    class PickySource:
+        name = "picky_board"
+        # Read a full page of listings, matched none of them.
+        scanned = 25
+
+        def fetch(self, limit: int = 50):
+            return []
+
+    stats = run_pipeline(
+        sources=[PickySource(), FakeSource([_lead(1)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    row = stats["by_source"]["picky_board"]
+    assert row["scanned"] == 25
+    assert "dead" not in row["verdict"]
+    assert "filtered-out" in row["verdict"]
