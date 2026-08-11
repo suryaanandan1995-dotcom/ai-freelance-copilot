@@ -119,6 +119,7 @@ def _fit_summary(
     threshold: int,
     unscored: int = 0,
     budget_exhausted: bool = False,
+    blocked_no_contact: int = 0,
 ) -> dict:
     """Summarise the run's fit-score distribution and name the likely bottleneck.
 
@@ -137,6 +138,15 @@ def _fit_summary(
     for this ICP, the one carrying an actual day rate — contributed zero scores to
     three consecutive runs. A confident verdict computed over a censored sample sends
     you to fix targeting that is already correct, which is worse than no verdict.
+
+    ``blocked_no_contact`` is how many of the leads that CLEARED the bar carry no email
+    address. It exists for the same reason ``budget_exhausted`` does, and it is the same
+    bug a second time: ``passed`` was treated as success, so any single passing lead
+    printed ``bottleneck: none``. Run 31364376553 scored a max of 97, put 47 leads over
+    the bar, emailed **one**, and reported "none — leads are clearing the bar". True about
+    the scores and false about the run: 46 of those 47 had no address, which is the whole
+    reason only one was actionable. Clearing the bar is not the same as being reachable,
+    and "none" tells the reader there is nothing to unblock.
 
     ``budget_exhausted`` is the run-level fact that the spend cap stopped the loop. It
     is threaded in because this function is the ONLY place that names a bottleneck, and
@@ -189,6 +199,19 @@ def _fit_summary(
             f"{n + unscored} new leads, so this distribution is a prefix, not a sample "
             f"({passed}/{n} cleared {threshold} before the stop). Raise max_usd_per_run "
             "or cut per-lead spend before reading targeting from it."
+        )
+    elif passed and blocked_no_contact >= max(1, passed // 2):
+        # Ranked ABOVE the "none" branch for the same reason budget is ranked above the
+        # distribution verdicts: it names the constraint that actually bound the run.
+        # Gated at half of ``passed`` so a run with a couple of unreachable leads still
+        # reports "none" — the point is to catch the case where being unreachable is the
+        # rule, not to replace a clean verdict with a caveat.
+        reachable = passed - blocked_no_contact
+        bottleneck = (
+            f"contacts: {blocked_no_contact} of {passed} leads that cleared {threshold} "
+            f"carry no email address, so automation could act on {reachable}. They are "
+            "listed under APPLY YOURSELF — this is a channel limit, not a targeting "
+            "problem, so changing queries or the threshold will not raise the send count."
         )
     elif passed:
         bottleneck = "none — leads are clearing the bar"
@@ -689,11 +712,15 @@ def run_pipeline(
     # place the run says what stopped it, and it read "none — leads are clearing the bar"
     # on a run that broke off against its spend cap. The flag was already in ``stats``
     # two lines up; the summary just could not see it.
+    # ``blocked_no_contact`` is the apply-yourself list, which by construction is exactly
+    # "cleared the bar, has no address". Passed in rather than re-derived so the headline
+    # bottleneck and that section can never disagree about the same run.
     stats["fit"] = _fit_summary(
         fit_scores,
         settings.min_fit_score,
         unscored=max(0, new - len(fit_scores)),
         budget_exhausted=budget_exhausted,
+        blocked_no_contact=len(apply_yourself),
     )
     stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
 
