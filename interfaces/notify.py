@@ -27,6 +27,35 @@ def _lead_url(base: str, lead_id) -> str:
     return f"{base.rstrip('/')}/lead/{lead_id}"
 
 
+#: How many apply-yourself leads the digest lists in full.
+#:
+#: Was 5, chosen when the section was written and before any production run measured
+#: the real volume. The first live run produced **46** qualified uncontactable leads
+#: scoring 97 down to 72, so the digest showed 5 and hid 41 — re-imposing a second,
+#: much higher bar that the owner never set, on top of the ``min_fit_score`` bar these
+#: leads had already cleared. That is the same defect the section was built to fix
+#: (output the automation produced never reaching the owner), one order of magnitude
+#: smaller. The ceiling exists only so a pathological run can't mail a thousand lines;
+#: when it bites, ``_dropped_note`` names what was cut and which lever shortens it.
+_APPLY_SHOWN = 30
+
+
+def _dropped_note(apply: list[dict]) -> str:
+    """Describe what the display cap cut, in terms that make the omission checkable.
+
+    A bare "and N more" says nothing about whether the hidden leads were worth seeing.
+    Because the list is sorted best-fit-first, truncation is really a score cut, so the
+    honest report is the score it cut at — plus the setting that shortens the list, so
+    the fix is the owner's choice rather than a number buried in this module.
+    """
+    hidden = len(apply) - _APPLY_SHOWN
+    cutoff = apply[_APPLY_SHOWN].get("fit_score", 0)
+    return (
+        f"and {hidden} more at score {cutoff} or below "
+        f"(top {_APPLY_SHOWN} shown; raise min_fit_score to shorten this list)"
+    )
+
+
 def _kpi_block() -> str:
     """Rolling outcome KPIs, or '' if unavailable.
 
@@ -158,7 +187,7 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
             f"APPLY YOURSELF — {len(apply)} qualified lead(s) with no email "
             "(apply form only):",
         ]
-        for lead in apply[:5]:
+        for lead in apply[:_APPLY_SHOWN]:
             company = lead.get("company") or lead.get("source", "")
             lines.append(
                 f"  - [{lead.get('fit_score', 0)}] {lead.get('title', '')}"
@@ -167,8 +196,8 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
             # The real listing URL, not a dashboard link: this is the one thing that
             # has to work without any hosted UI.
             lines.append(f"      {lead.get('url', '')}")
-        if len(apply) > 5:
-            lines.append(f"  ... and {len(apply) - 5} more (top 5 shown, best fit first)")
+        if len(apply) > _APPLY_SHOWN:
+            lines.append(f"  ... {_dropped_note(apply)}")
 
     lines += ["", "Nothing was submitted automatically — review and submit yourself."]
     return "\n".join(lines)
@@ -213,8 +242,9 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
     # Titles and companies come from third-party job posts, so they are escaped: this
     # HTML is assembled by f-string concatenation, and unescaped remote text in it is
     # an injection into the owner's own inbox.
+    apply_all = stats.get("apply_yourself") or []
     apply_rows = ""
-    for lead in (stats.get("apply_yourself") or [])[:5]:
+    for lead in apply_all[:_APPLY_SHOWN]:
         url = escape(str(lead.get("url") or ""), quote=True)
         title = escape(str(lead.get("title") or ""))
         company = escape(str(lead.get("company") or lead.get("source") or ""))
@@ -223,9 +253,17 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
             f'<a href="{url}">{title}</a>'
             f'{f" — {company}" if company else ""}</li>'
         )
+    # The HTML digest is the one most likely to be read, so it must not silently show a
+    # shorter list than the plaintext part of the same message.
+    apply_more = (
+        f'<p style="color:#666">… {escape(_dropped_note(apply_all))}</p>'
+        if len(apply_all) > _APPLY_SHOWN
+        else ""
+    )
     apply_html = (
-        "<h3>Apply yourself — qualified, no email (apply form only)</h3>"
-        f"<ol>{apply_rows}</ol>"
+        f"<h3>Apply yourself — {len(apply_all)} qualified, no email "
+        "(apply form only)</h3>"
+        f"<ol>{apply_rows}</ol>{apply_more}"
         if apply_rows
         else ""
     )

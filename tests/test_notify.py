@@ -441,16 +441,63 @@ def test_the_apply_section_is_absent_when_there_is_nothing_to_apply_to():
 
 
 def test_the_apply_section_says_how_many_it_is_not_showing():
-    """Truncating to 5 silently would read as "5 leads" when there were 12."""
+    """A truncated list must state the total AND what the cut removed.
+
+    The first production run produced 46 qualified uncontactable leads; the cap was 5,
+    so 41 were hidden behind "and 41 more" — no way to tell whether they were worth
+    looking at. Because the list is sorted best-fit-first, truncation is a score cut, so
+    the note names the score it cut at and the setting that shortens the list.
+    """
+    from interfaces.notify import _APPLY_SHOWN, _plaintext
+
+    n = _APPLY_SHOWN + 7
+    text = _plaintext(_apply_stats(n), [], "http://localhost:8000")
+    assert f"{n} qualified lead(s)" in text
+    assert "and 7 more" in text
+    # _apply_stats scores descend as 80 - i, so the first hidden lead scores this.
+    assert f"score {80 - _APPLY_SHOWN} or below" in text
+    # Name the lever, not just the symptom.
+    assert "min_fit_score" in text
+
+
+def test_the_apply_section_shows_a_realistic_days_volume_in_full():
+    """46 qualified leads/run is the measured reality, not a hypothetical.
+
+    The cap was 5, set before any run measured the volume, which meant the digest
+    re-imposed a second bar far above the min_fit_score these leads had already cleared
+    — hiding 41 of 46. The section exists precisely so the automation's output reaches
+    the owner; a cap that drops 89% of it recreates the bug at one order of magnitude
+    smaller.
+    """
     from interfaces.notify import _plaintext
 
-    text = _plaintext(_apply_stats(12), [], "http://localhost:8000")
-    assert "12 qualified lead(s)" in text
-    assert "and 7 more" in text
+    text = _plaintext(_apply_stats(46), [], "http://localhost:8000")
+    # Everything the owner set the bar for is listed, not just a teaser.
+    assert text.count("https://boards.example.com/job/") >= 30
+    assert "and 16 more" in text
+
+
+def test_the_html_digest_does_not_show_fewer_leads_than_the_plaintext():
+    """Both parts are the same message; a cap applied to one is a silent discrepancy.
+
+    The HTML alternative is what a mail client renders, so if it truncated shorter than
+    the plaintext the owner would never see the difference existed.
+    """
+    from interfaces.notify import _html, _plaintext
+
+    stats = _apply_stats(46)
+    html = _html(stats, [], "http://localhost:8000")
+    text = _plaintext(stats, [], "http://localhost:8000")
+    assert html.count("https://boards.example.com/job/") == text.count(
+        "https://boards.example.com/job/"
+    )
+    # And the HTML says what it cut, in the same terms.
+    assert "and 16 more" in html
+    assert "46 qualified" in html
 
 
 def test_apply_leads_are_ordered_best_fit_first():
-    """Only the top 5 are shown, so ordering decides what the owner actually sees."""
+    """The list is capped, so ordering decides what the owner actually sees."""
     from interfaces.notify import _plaintext
 
     stats = _apply_stats(3)

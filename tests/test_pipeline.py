@@ -1003,3 +1003,73 @@ def test_the_scan_count_reaches_the_report_from_the_adapter():
     assert row["scanned"] == 25
     assert "dead" not in row["verdict"]
     assert "filtered-out" in row["verdict"]
+
+
+# --------------------------------------------------------------------------- #
+# clearing the bar is not the same as being reachable
+# --------------------------------------------------------------------------- #
+def test_qualified_but_unreachable_leads_are_not_reported_as_no_bottleneck():
+    """`passed` was treated as success, so one passing lead printed "none".
+
+    Run 31364376553 scored a max of 97, put 47 leads over the bar, emailed ONE, and
+    reported `bottleneck: none — leads are clearing the bar`. True about the scores and
+    false about the run: 46 of the 47 had no email address, which is the entire reason
+    only one was actionable. "none" tells the reader there is nothing to unblock.
+    """
+    from pipeline import _fit_summary
+
+    out = _fit_summary([97, 88, 85, 82, 72], threshold=70, blocked_no_contact=4)
+    bottleneck = out["bottleneck"]
+    assert "none" not in bottleneck
+    assert bottleneck.startswith("contacts")
+    # The counts have to travel with the verdict: 4 of 5 blocked, 1 actionable.
+    assert "4 of 5" in bottleneck
+    assert "act on 1" in bottleneck
+    # And it must point at the section that carries them, not at targeting.
+    assert "APPLY YOURSELF" in bottleneck
+
+
+def test_a_run_whose_leads_are_reachable_still_reports_no_bottleneck():
+    """The complement: don't replace a clean verdict with a caveat.
+
+    A couple of unreachable leads is normal. The new branch is gated at half of `passed`
+    so it fires when being unreachable is the rule, not whenever it happens at all.
+    """
+    from pipeline import _fit_summary
+
+    out = _fit_summary([97, 88, 85, 82, 72], threshold=70, blocked_no_contact=1)
+    assert out["bottleneck"] == "none — leads are clearing the bar"
+
+
+def test_the_contact_bottleneck_does_not_outrank_the_budget_one():
+    """Budget keeps precedence: it says what STOPPED the run, which outranks any
+    statement about the shape of what it managed to score."""
+    from pipeline import _fit_summary
+
+    out = _fit_summary(
+        [97, 88, 85, 82, 72], threshold=70, blocked_no_contact=5, budget_exhausted=True
+    )
+    assert out["bottleneck"].startswith("budget")
+
+
+def test_the_headline_bottleneck_and_the_apply_list_cannot_disagree():
+    """End to end: the count comes from the apply-yourself list itself.
+
+    Re-deriving it here would let the headline say "none" while the section below it
+    listed 46 unreachable leads — one run described two different ways in one email.
+    """
+    from pipeline import run_pipeline
+
+    leads = [_lead(i) for i in range(4)]
+    for lead in leads:
+        lead.description = "Great contract role. No way to contact us but apply online."
+    stats = run_pipeline(
+        sources=[FakeSource(leads)],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+
+    blocked = len(stats["apply_yourself"])
+    if blocked and blocked >= max(1, stats["fit"]["passed"] // 2):
+        assert stats["fit"]["bottleneck"].startswith("contacts")
+        assert f"of {stats['fit']['passed']} leads" in stats["fit"]["bottleneck"]
