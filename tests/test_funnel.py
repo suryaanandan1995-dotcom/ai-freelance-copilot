@@ -156,6 +156,86 @@ def test_only_the_latest_run_decides_contactable(temp_db, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# contactable_supply — the intersection, not the raw count
+#
+# Friday 2026-08-14 (monitor run 31785221158) printed "[ok] contactable_supply: 29
+# contactable lead(s)" on the THIRD consecutive run that emailed nobody. Both halves
+# were true: 29 addresses existed, and not one belonged to a lead worth writing to.
+# A floor of 1 on a number that sat at 28-47 every single run is a check that cannot
+# fail for the reason it exists.
+# --------------------------------------------------------------------------- #
+def test_addresses_without_qualified_leads_is_reported_as_a_failure(temp_db, monkeypatch):
+    """Friday 08-14, reproduced: 29 contactable, 42 over the bar, all 42 unreachable."""
+    _settings(monkeypatch, min_contactable_per_run=1)
+    _seed([{
+        "emailed": 0,
+        "queued": 0,
+        "contactable": 29,
+        "fit": {"passed": 42},
+        "apply_yourself": [{"fit_score": 80}] * 42,
+    }])
+
+    result = funnel.check_contactable_supply()
+    assert result["ok"] is False
+    # Both numbers, because the GAP between them is the diagnosis.
+    assert "29 contactable" in result["detail"]
+    assert "only 0" in result["detail"]
+    # And the lever it must not send the reader towards.
+    assert "different sources" in result["detail"]
+
+
+def test_a_run_with_a_real_intersection_passes(temp_db, monkeypatch):
+    """Tuesday 08-11: 47 contactable, 38 passed, 34 unreachable -> 4 actionable, 4 sent."""
+    _settings(monkeypatch, min_contactable_per_run=1)
+    _seed([{
+        "emailed": 4,
+        "queued": 4,
+        "contactable": 47,
+        "fit": {"passed": 38},
+        "apply_yourself": [{"fit_score": 80}] * 34,
+    }])
+
+    result = funnel.check_contactable_supply()
+    assert result["ok"] is True
+    assert "4 qualified + reachable" in result["detail"]
+    assert "47 contactable" in result["detail"]
+
+
+def test_a_run_predating_the_fit_block_falls_back_to_queued(temp_db, monkeypatch):
+    """``queued`` is the honest proxy: an uncontactable lead is drafted with
+    draft_allowed=False and so can never reach the queue."""
+    _settings(monkeypatch, min_contactable_per_run=1)
+    _seed([{"contactable": 30, "queued": 0}])
+
+    result = funnel.check_contactable_supply()
+    assert result["ok"] is False
+    assert "only 0" in result["detail"]
+
+
+def test_a_run_recording_neither_fit_nor_queued_measures_nothing(temp_db, monkeypatch):
+    """A missing input must say it measured nothing. Returning 0 would assert an empty
+    intersection it never observed, and fail every historical row."""
+    _settings(monkeypatch, min_contactable_per_run=1)
+    _seed([{"contactable": 30}])
+
+    result = funnel.check_contactable_supply()
+    assert result["ok"] is True
+    assert "not recorded" in result["detail"]
+
+
+def test_the_raw_sourcing_collapse_still_reports_as_sourcing(temp_db, monkeypatch):
+    """The two failures need opposite fixes, so they must not share one message: zero
+    addresses is a sourcing problem, addresses-without-good-leads is a routing one."""
+    _settings(monkeypatch, min_contactable_per_run=1)
+    _seed([{"contactable": 0, "fit": {"passed": 40}, "apply_yourself": []}])
+
+    result = funnel.check_contactable_supply()
+    assert result["ok"] is False
+    assert "sourcing problem" in result["detail"]
+    assert "different sources" not in result["detail"]
+
+
+# --------------------------------------------------------------------------- #
 # scoping
 # --------------------------------------------------------------------------- #
 def test_linkedin_runs_do_not_count_as_outreach(temp_db, monkeypatch):
@@ -209,3 +289,107 @@ def test_doctor_includes_the_funnel_checks(temp_db, monkeypatch):
 
     names = {c["name"] for c in doctor.run_healthcheck()["checks"]}
     assert {"outreach_flow", "queue_flow", "contactable_supply"} <= names
+
+
+# --------------------------------------------------------------------------- #
+# discovery — running, and producing nothing
+# --------------------------------------------------------------------------- #
+def test_discovery_finding_nothing_across_runs_fails(temp_db, monkeypatch):
+    """The failure mode discovery has: it fetches, it is refused, it reports zero.
+
+    A blocked user-agent and a world with no published addresses produce the identical
+    ``discovered: 0``, so the check names what it cannot distinguish instead of asserting
+    a cause — but it must fire, because the alternative is an ``outreach_flow`` alert
+    days later pointing at sends.
+    """
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=3)
+    _seed([{"discovery_attempts": 12, "discovered": 0} for _ in range(3)])
+
+    result = funnel.check_discovery_productive()
+    assert result["ok"] is False
+    assert "36 lookup(s)" in result["detail"]  # the denominator, not a bare zero
+
+
+def test_a_single_found_address_is_enough_to_pass(temp_db, monkeypatch):
+    """The check watches for a dead mechanism, not for a low yield.
+
+    Discovery hitting on 1 of 36 is a tuning question the digest already reports; it is
+    not the thing that needs waking somebody up.
+    """
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=3)
+    _seed(
+        [
+            {"discovery_attempts": 12, "discovered": 0},
+            {"discovery_attempts": 12, "discovered": 1},
+            {"discovery_attempts": 12, "discovered": 0},
+        ]
+    )
+    assert funnel.check_discovery_productive()["ok"] is True
+
+
+def test_runs_that_never_looked_are_not_evidence(temp_db, monkeypatch):
+    """``0 of 0`` and ``0 of 40`` need opposite fixes, so only the second counts.
+
+    Zero attempts means every qualified lead already published an address — the good
+    case. Counting it toward the streak would make the check fire hardest exactly when
+    the funnel is healthiest, which is how a guard trains its reader to ignore it.
+    """
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=2)
+    _seed([{"discovery_attempts": 0, "discovered": 0} for _ in range(6)])
+
+    result = funnel.check_discovery_productive()
+    assert result["ok"] is True
+    assert "0 run(s) have attempted discovery" in result["detail"]
+
+
+def test_one_barren_run_is_too_early_to_judge(temp_db, monkeypatch):
+    """Discovery only fires on qualified-uncontactable leads, so a run can legitimately
+    attempt two lookups and find nothing. The streak is measured in runs that looked."""
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=3)
+    _seed(
+        [
+            {"discovery_attempts": 0, "discovered": 0},
+            {"discovery_attempts": 2, "discovered": 0},
+        ]
+    )
+    result = funnel.check_discovery_productive()
+    assert result["ok"] is True
+    assert "1 run(s)" in result["detail"]
+
+
+def test_discovery_disabled_is_not_a_failure(temp_db, monkeypatch):
+    """A switched-off feature is a decision, not an outage — and the old runs in history
+    would otherwise keep alerting about a mechanism nobody is running."""
+    _settings(monkeypatch, discover_contacts=False, alert_after_zero_email_runs=1)
+    _seed([{"discovery_attempts": 40, "discovered": 0} for _ in range(4)])
+
+    result = funnel.check_discovery_productive()
+    assert result["ok"] is True
+    assert "disabled" in result["detail"]
+
+
+def test_runs_predating_discovery_do_not_alert(temp_db, monkeypatch):
+    """Rows recorded before these counters existed carry neither key. A missing input
+    must read as "measured nothing", not as a measured zero."""
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=2)
+    _seed([{"emailed": 1, "queued": 3} for _ in range(5)])
+
+    assert funnel.check_discovery_productive()["ok"] is True
+
+
+def test_non_numeric_discovery_stats_do_not_raise(temp_db, monkeypatch):
+    """Stats are JSON from a past version of the code; the monitor must degrade."""
+    _settings(monkeypatch, discover_contacts=True, alert_after_zero_email_runs=2)
+    _seed([{"discovery_attempts": "lots", "discovered": None}, {"discovery_attempts": None}])
+
+    assert funnel.check_discovery_productive()["ok"] is True
+
+
+def test_doctor_includes_the_discovery_check(temp_db, monkeypatch):
+    """Registered, not merely defined. The last four checks in this file were each written
+    before the function that runs them knew they existed."""
+    import monitor.doctor as doctor
+
+    _settings(monkeypatch, discover_contacts=True)
+    names = {c["name"] for c in doctor.run_healthcheck()["checks"]}
+    assert "discovery" in names

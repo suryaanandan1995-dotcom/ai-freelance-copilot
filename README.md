@@ -138,13 +138,14 @@ For each freshly **queued, strong-fit** lead, it:
 - **Master gate** — nothing sends unless `COPILOT_AUTO_EMAIL=true` *and* `COPILOT_SMTP_HOST` is set. The sender is a hard no-op otherwise, so the default config can never email anyone.
 - **Fit floor** — only leads scoring ≥ `COPILOT_OUTREACH_MIN_FIT` (default **70**) are contacted. It shipped at **80**, a bar **no run had ever cleared once**, so the send path was closed by arithmetic: (the first version of this line claimed 78 was the highest score the scorer could produce — that was wrong, and instructively so. 78 was the max of the three most recent *aggregates*, the only numbers left in the CI logs; the July run in `copilot.db` records 13 leads scoring **72–88**. Pinning a ceiling to that stale sample would have made the test the next gate fighting the product, so the assertion is the domain bound instead.) the pipeline paid Opus prices to draft a proposal, logged `queued: 1`, then discarded it as `low_fit` — and reported the run a success. That is this repo's signature defect, a gate that cannot pass for the reason it exists, and it is why 24 consecutive green runs emailed nobody. The floor is now pinned to `min_fit_score` by [`tests/test_thresholds.py`](tests/test_thresholds.py): **a lead good enough to draft is good enough to send**, since the draft is the expensive half. It is deliberately *not* lower — measured fit p50 is 28 and p90 is 58, and the floor still has to exclude those, because sender reputation is the one asset cold outreach cannot rebuy.
 - **Daily cap** — at most `COPILOT_MAX_EMAILS_PER_DAY` sends per UTC day (code default **20**; the shipped [`.env.example`](.env.example) sets **8**). Low volume protects reply quality, domain reputation, and legality. The cap is counted **across every channel** ([`outreach/quota.py`](outreach/quota.py)) — cold emails and follow-ups draw on one budget, because a sending domain's reputation isn't a property of the code path that used it.
+- **Warmup ramp** — the configured cap is a ceiling, not a target. `effective_cap` limits any day to `max(10, 1.5 x the busiest day in the last 14)`, so raising the cap or a jump in contactable supply cannot turn 6 sends/week into 20/day overnight; a volume step change from an unknown domain is what reputation systems are built to catch. It caps only, never raises. **The first version of this did nothing at all**: the timestamps come back from a plain `DateTime` column as naive, comparing them against an aware `now` raised `TypeError` on every call, and the blanket `except` — there so a measurement bug can never block a send — returned the unramped cap silently. The fallback now logs "**NO warmup ramp**" and a test asserts that wording.
 - **Dedupe** — the `outreach` table has a **UNIQUE** email column; an address is **never emailed twice**, across runs.
 - **Suppression list** — `data/suppressed.txt` (one lowercased email per line) is honored before every send. Drop an address in there to permanently stop emailing it.
 - **Opt-out footer** — every email always carries a plain-text identity + opt-out line (`Reply 'unsubscribe' …`) and a `Reply-To` to `COPILOT_OPT_OUT_MAILBOX`.
 
 **Legality.** This is B2B outreach to people who *published a hiring contact* — a textbook **legitimate-interest** basis under UK **PECR**/GDPR and consistent with CAN-SPAM: a real sender identity, a real reply address, an easy opt-out, no deception, and low volume by design. It is **not** scraped bulk marketing. Upwork/LinkedIn proposals stay human-submit — this channel is **email only** and never touches a platform API.
 
-> Stats from a run include `emailed` and an `emailed_skipped` breakdown (`no_email`, `low_fit`, `duplicate`, `suppressed`, `daily_cap`) so you can see exactly why each lead was or wasn't contacted.
+> Stats from a run include `emailed` and an `emailed_skipped` breakdown (`low_fit`, `duplicate`, `suppressed`, `daily_cap`, and a **reason-coded** `no_email_*` — `no_address_in_post`, `domain_refused_mail`, `rejected_do_not_contact`, `rejected_non_hiring`) so you can see exactly why each lead was or wasn't contacted. The single `no_email_pregate` key it replaced covered **851 of 1,047** leads and named none of them.
 
 ### Deploying the schedule
 
@@ -384,6 +385,152 @@ since that number has two causes needing opposite fixes: scores clustered just b
 threshold mean the threshold is too strict, scores far below it mean the sources are
 off-ICP.
 
+### The two halves of the funnel never met
+
+Ten days of production data (6 weekday runs, 2026-08-10 → 08-17) explained a month of
+near-zero sends, and no single metric in the digest had been wrong:
+
+| | 10-day total |
+|---|---|
+| listings read | 17,905 |
+| new leads | 1,047 |
+| cleared the fit bar of 70 | **269** (max 97) |
+| carried a usable email | **196** |
+| **both at once** | **7** |
+| emails sent | **6** |
+
+Every number on the left looked healthy. The intersection is the only one that predicts a
+send, and nothing computed it. Per source, qualified vs contactable:
+
+| source | qualified (70+) | contactable |
+|---|---|---|
+| contract_jobs (Adzuna) | 79 | 0 |
+| jobicy | 76 | 14 |
+| remote_boards | 76 | 1 |
+| working_nomads | 17 | 0 |
+| contra_startup | 14 | 0 |
+| hn_hiring | 7 | **181** |
+
+**Two populations, barely overlapping.** 181 of the 196 addresses came from
+`hn_hiring` — whose posts are full-time employment ads, median fit **28** against a bar of
+70 — while 186 qualified leads came from job boards that supplied **one** address between
+them, because a board monetises the click and routes through an apply form. The per-run
+overlap was 1, 4, 0, 0, 0, 2; on the three zero days it was a coin flip over a set of size
+one.
+
+This is the project's recurring shape — **a check that cannot fail for the reason it
+exists** — at the level of the funnel itself:
+
+* `contactable: 29` was true and reported `[ok]` against a floor of 1, on the third
+  consecutive run that emailed nobody. The floor guarded a number that never dropped.
+  `check_contactable_supply` now measures **qualified ∩ reachable** and reports both, since
+  the gap between them is the diagnosis: zero addresses is a *sourcing* problem, addresses
+  attached to the wrong work is a *routing* problem, and they need opposite fixes.
+* `bottleneck: contacts — N of M carry no email` was true but stopped one level short of
+  the lever. It now names the sources on each side, so "widen the queries" and "lower the
+  bar" are visibly ruled out: neither can make a job board publish an address.
+
+Three fixes followed from the diagnosis rather than from guessing:
+
+1. **`outreach/discover.py`** — contactability used to be *"did the post body happen to
+   contain an address"*, one regex over text we were handed. Discovery visits the
+   **company's own site** and reads the address it publishes. It never guesses a pattern
+   (`careers@`, `first.last@`): guessed addresses bounce, and bounces burn the sending
+   domain, which is the one asset cold outreach cannot rebuy. It reuses the existing
+   contact gate rather than reimplementing it, requires the address's domain to match the
+   company's, blocklists aggregators and ATS hosts so a board can never be mistaken for
+   the employer, and honours `robots.txt`. How it resolves that company site decides
+   whether the result may be *sent* or only *shown* — see
+   [Send on evidence, propose on a guess](#send-on-evidence-propose-on-a-guess).
+2. **`sources/reddit_forhire.py`, back in the registry** — r/forhire `[Hiring]` posts are
+   the one source where a *client* posts *contract* work *with* an address, which is
+   precisely the missing overlap. It had been out since 2026-08-03 for a fixable reason:
+   `403` on 48/48 unauthenticated fetches. App-only OAuth is free.
+3. **`outreach/apply_pack.py`** — the 262 qualified leads with no address have no
+   automated route at all (`auto_submit` is permanently off). Listing a link is not a
+   hand-off; applying still meant re-reading the post and writing the pitch 262 times. A
+   pack makes each one paste-and-submit.
+
+The correction worth recording: an earlier read of two runs concluded *contactability* was
+the binding constraint. It wasn't — 196 leads **were** contactable. Two runs could not
+distinguish "few addresses" from "addresses on the wrong leads", and those have different
+fixes. A sample that cannot separate two hypotheses does not favour either.
+
+### Send on evidence, propose on a guess
+
+Discovery resolves a company's domain two ways, and only one of them is evidence:
+
+* **the post is hosted on the company's own site** — the domain *is* where the listing was
+  published, so writing to it is replying to the party that posted;
+* **the post is on a job board**, so the domain is derived from the company **name**
+  (`"Acme Corp"` → `acme.com` → `.io` → `.ai`) and accepted if the homepage mentions the
+  company.
+
+The second path is the *only* one that fires for the 262-lead population discovery was built
+for — those leads come from boards by definition. It was also measured the first time it ever
+ran, by accident: discovery was unpinned in the offline test suite, a fixture company called
+"Acme Corp" resolved the real `acme.com`, fetched its homepage and returned
+`frobozz07@mail.acme.com`. A stranger's address, first try, from a unit test. Generic company
+names all have a `.com` owner who is not the client.
+
+So the resolution is neither "ship it" nor "delete it". **A name is not an identifier**, and
+a guessed address is reported, never mailed: the digest shows it under `POSSIBLE ADDRESSES`
+with both the page it came from and the post it was matched to, which is all a human needs to
+bin it in two seconds. `discover_send_to_guessed_domains` (default **off**) exists so the
+decision can later be revisited from weeks of free proposals the owner has eyeballed, instead
+of re-argued from the heuristic. Same shape as `apply_yourself`: automate to the hand-off,
+then hand off completely.
+
+Two counters, never one: `discovered` counts addresses usable enough to send to,
+`discovery_attempts` counts lookups. `contactable` is deliberately **not** incremented by
+either — it means "the listing published an address", and that is the measurement the whole
+qualified-vs-reachable diagnosis rests on. Folding discovered addresses into it would erase
+the split that exposed the problem while the feeds stayed exactly as unreachable.
+
+### The counter that named nothing
+
+`no_email_pregate` accounted for **851 of 1,047** leads and identified none of them. It is now
+four reason codes (`no_address_in_post`, `domain_refused_mail`, `rejected_do_not_contact`,
+`rejected_non_hiring`), because each has a different lever and one bucket that big is a fact
+without a next step. `find_deliverable_email_with_reason` returns the code the gate actually
+took, rather than a caller re-deriving it.
+
+### What already reported success while doing nothing
+
+Two more instances of the project's signature defect, both found in the same pass:
+
+* **The warmup ramp never ramped.** `peak_daily_sends` compared a tz-aware `now` against
+  timestamps read back from a plain `DateTime` column, so it raised `TypeError` on every
+  call — and `effective_cap`'s blanket `except Exception` (there so a measurement bug can
+  never block a send) returned the unramped configured cap and logged nothing. The fallback
+  now says **"NO warmup ramp"** in the log line, and a test asserts that wording: a permissive
+  fallback that is indistinguishable from a working guard is not a guard.
+* **Apply-pack spend was unmetered.** Packs are Opus calls made *after* the lead loop, whose
+  `finally` uninstalls the cost tracker — so pack cost was billed to the account, gated by no
+  budget and shown in no report. The tracker is re-installed for the pack build and
+  `cost_usd` re-read afterwards.
+
+And the mechanism that watches for the next one: `check_discovery_productive` fails when
+discovery has attempted lookups across consecutive runs and found **zero** addresses, because
+a blocked user-agent, a `robots.txt` change and "companies genuinely publish no address" all
+produce the identical `discovered: 0` and a clean exit code. It is gated on *attempts*, so a
+run that never needed to look does not count toward the streak — `0 of 0` and `0 of 40` need
+opposite fixes.
+
+### What the test suite had to be pinned against
+
+Two production defaults were pinned off in `tests/conftest.py`, for the same reason the Reddit
+credentials were: a default that changes what the suite *does* means a green suite that goes
+red on a correct production change.
+
+* `COPILOT_DISCOVER_CONTACTS=false` — the acme.com incident above. An offline suite whose
+  premise is that it touches no network was making real outbound requests to strangers'
+  websites. `tests/test_discover.py` opts back in and supplies its own web via
+  `httpx.MockTransport`.
+* `COPILOT_APPLY_PACKS=false` — an extra model call per hand-off lead consumed the scripted
+  responses of tests counting model calls to prove something else, and a pre-gate test
+  asserting "exactly one call" started reading 2.
+
 ## Observability
 
 The dashboard exposes a Prometheus `/metrics` endpoint. Key series:
@@ -427,7 +574,9 @@ ai-freelance-copilot/
 │   ├── compliance.py           # deterministic review gate
 │   └── followup.py             # polite nudge drafts
 ├── sources/                    # read-only lead adapters + registry
-├── outreach/                   # auto-email channel: extract → pitch → send (gated, deduped, opt-out)
+├── outreach/                   # auto-email channel: extract → discover → pitch → send (gated, deduped, opt-out)
+│                               #   discover.py = find a published address; apply_pack.py = the hand-off
+├── monitor/funnel.py           # output-based health checks (a green run that reaches nobody is a failure)
 ├── reply/                      # auto-reply: inbox (IMAP) → respond (guardrailed) → sender → runner
 ├── rag/                        # embedder, vector store, retriever, ingest, learning loop
 ├── db/                         # SQLAlchemy models + session
@@ -501,7 +650,12 @@ All variables are prefixed `COPILOT_` (see [`.env.example`](.env.example)).
 | `COPILOT_ADZUNA_APP_ID` / `_APP_KEY` | _empty_ | Free Adzuna API credentials ([developer.adzuna.com](https://developer.adzuna.com)) enabling the UK day-rate contract source. Unset = that source is skipped. |
 | `COPILOT_VERIFY_CONTACT_DOMAIN` | `true` | Require the contact domain to publish MX/A records before sending. Protects sender reputation — the one asset cold outreach cannot rebuy. Set `false` only for offline tests/dev. |
 | `COPILOT_REQUIRE_CONTACT_BEFORE_DRAFT` | `true` | Drop leads with no reachable email **before** spending Opus tokens drafting to them. |
-| `COPILOT_ALERT_AFTER_ZERO_EMAIL_RUNS` | `3` | Consecutive zero-email runs before the health monitor alerts. |
+| `COPILOT_ALERT_AFTER_ZERO_EMAIL_RUNS` | `3` | Consecutive zero-email runs before the health monitor alerts. Also the number of runs that must have *attempted* discovery before `check_discovery_productive` will call a zero yield a fault. |
+| `COPILOT_DISCOVER_CONTACTS` | `true` | Visit the company's own site for a published address when the post carries none. Makes real outbound HTTP, honours `robots.txt`, and is pinned **off** in the test suite. |
+| `COPILOT_MAX_CONTACT_DISCOVERIES_PER_RUN` | `40` | Lookup budget per run, counted on **attempts** not hits — a cap that counted only successes would let a run where nothing is findable fetch every lead's worth of pages. |
+| `COPILOT_DISCOVER_SEND_TO_GUESSED_DOMAINS` | `false` | When the domain was guessed from the company *name* rather than published by the post, mail it. Off: those addresses are proposed in the digest instead. See [Send on evidence, propose on a guess](#send-on-evidence-propose-on-a-guess). |
+| `COPILOT_APPLY_PACKS` | `true` | Draft a paste-ready application pack for each qualified lead automation cannot reach. Pinned **off** in tests. |
+| `COPILOT_MAX_APPLY_PACKS_PER_RUN` | `5` | Packs per digest, best fit first. Each is one Opus call, metered against `MAX_USD_PER_RUN`. |
 | `COPILOT_CAL_WEBHOOK_SECRET` | _empty_ | HMAC secret for the cal.com booking webhook; blank skips verification (dev only). |
 
 ## Deployment

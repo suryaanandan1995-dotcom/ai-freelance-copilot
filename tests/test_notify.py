@@ -605,3 +605,156 @@ def test_the_subject_does_not_call_a_filtered_source_dead(monkeypatch):
     )
     subject = _FakeSMTP.sent[0]["Subject"]
     assert "DEAD" not in subject
+
+
+# --------------------------------------------------------------------------- #
+# discovery + the guessed-domain hand-off
+# --------------------------------------------------------------------------- #
+def test_the_discovery_line_always_carries_its_denominator(monkeypatch):
+    """"Discovered: 0" is unreadable alone.
+
+    0 of 0 means every qualified lead already had an address; 0 of 40 means discovery ran
+    forty times and failed — a blocked user-agent, a broken selector, an ATS-hosted world.
+    Those need opposite fixes, and this project has acted on the wrong one of the pair
+    before (see ``read=`` on the source lines, added for the same reason).
+    """
+    _email_settings(monkeypatch)
+    notify.send_digest(dict(_stats(), discovered=0, discovery_attempts=37), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+    assert "0 of 37" in body
+
+
+def test_the_discovery_line_is_absent_when_no_lookup_happened(monkeypatch):
+    """A row that is always present and always 0 trains the reader to skip it, and then
+    says exactly the same thing on the day discovery breaks."""
+    _email_settings(monkeypatch)
+    notify.send_digest(dict(_stats(), discovered=0, discovery_attempts=0), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+    assert "Discovered" not in body
+
+
+def test_guessed_addresses_are_shown_as_unsent(monkeypatch):
+    """The hand-off for the path that may not send.
+
+    Both URLs have to be there: the judgement the owner is being asked to make is
+    "does this page belong to that post", and neither link answers it alone.
+    """
+    _email_settings(monkeypatch)
+    stats = dict(
+        _stats(),
+        discovered=0,
+        discovery_attempts=4,
+        proposed_contacts=[
+            {
+                "email": "frobozz07@mail.acme.com",
+                "domain": "acme.com",
+                "source_url": "https://acme.com/",
+                "lead_url": "https://www.jobicy.com/jobs/12345",
+                "title": "K8s hardening",
+                "company": "Acme Corp",
+                "fit_score": 88,
+            }
+        ],
+    )
+    notify.send_digest(stats, _top())
+    msg = _FakeSMTP.sent[0]
+    body = msg.get_body(preferencelist=("plain",)).get_content()
+    assert "frobozz07@mail.acme.com" in body
+    assert "NOT emailed" in body
+    assert "https://acme.com/" in body
+    assert "https://www.jobicy.com/jobs/12345" in body
+
+    html = msg.get_body(preferencelist=("html",)).get_content()
+    assert "frobozz07@mail.acme.com" in html
+    assert "Nothing was emailed to these" in html
+
+
+def test_a_proposed_address_is_escaped_in_the_html_digest(monkeypatch):
+    """This is the least trustworthy text in the digest — it came off a stranger's page,
+    and the HTML is assembled by f-string concatenation."""
+    _email_settings(monkeypatch)
+    stats = dict(
+        _stats(),
+        discovery_attempts=1,
+        proposed_contacts=[
+            {
+                "email": "x@acme.com",
+                "source_url": "https://acme.com/",
+                "lead_url": "https://board.io/1",
+                "company": '<script>alert("xss")</script>',
+                "fit_score": 80,
+            }
+        ],
+    )
+    notify.send_digest(stats, _top())
+    html = _FakeSMTP.sent[0].get_body(preferencelist=("html",)).get_content()
+    assert "<script>alert" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_apply_packs_are_appended_after_the_full_list(monkeypatch):
+    """The packs are a subset and the list is complete, so both are shown.
+
+    A reader given 2 detailed blocks and no list would reasonably conclude there were 2
+    leads, when the run handed over 40.
+    """
+    _email_settings(monkeypatch)
+    apply_all = [
+        {"title": f"Role {i}", "url": f"https://board.io/{i}", "company": "Acme",
+         "source": "contract_jobs", "fit_score": 90 - i}
+        for i in range(6)
+    ]
+    stats = dict(
+        _stats(),
+        apply_yourself=apply_all,
+        apply_packs=[
+            {"text": "PACK ONE BODY", "html": "<div>PACK ONE HTML</div>"},
+            {"text": "PACK TWO BODY", "html": "<div>PACK TWO HTML</div>"},
+        ],
+    )
+    notify.send_digest(stats, _top())
+    msg = _FakeSMTP.sent[0]
+    body = msg.get_body(preferencelist=("plain",)).get_content()
+    assert "APPLY YOURSELF — 6" in body
+    assert "READY TO PASTE — 2 of those 6" in body
+    assert "PACK ONE BODY" in body and "PACK TWO BODY" in body
+    # Order matters: the list first, then the detail.
+    assert body.index("APPLY YOURSELF") < body.index("READY TO PASTE")
+
+    html = msg.get_body(preferencelist=("html",)).get_content()
+    assert "PACK ONE HTML" in html
+    assert "Ready to paste — 2 of those 6" in html
+
+
+def test_a_run_with_no_packs_says_nothing_about_them(monkeypatch):
+    """The pack build is capped, budget-gated and best-effort, so a run can legitimately
+    hand over leads with no packs. That must not render an empty heading."""
+    _email_settings(monkeypatch)
+    stats = dict(
+        _stats(),
+        apply_yourself=[{"title": "Role", "url": "https://board.io/1", "fit_score": 88}],
+        apply_packs=[],
+    )
+    notify.send_digest(stats, _top())
+    msg = _FakeSMTP.sent[0]
+    body = msg.get_body(preferencelist=("plain",)).get_content()
+    assert "APPLY YOURSELF" in body
+    assert "READY TO PASTE" not in body
+    html = msg.get_body(preferencelist=("html",)).get_content()
+    assert "Ready to paste" not in html
+
+
+def test_the_source_lines_separate_published_from_discovered_addresses(monkeypatch):
+    """One column per fact. A feed that publishes no addresses is still the wrong feed to
+    widen even when discovery rescues its leads, and a merged column hides that."""
+    _email_settings(monkeypatch)
+    rows = {
+        "contract_jobs": {
+            "scanned": 1800, "fetched": 40, "considered": 40, "new": 20,
+            "contactable": 0, "discovered": 6, "queued": 6, "verdict": "",
+        },
+    }
+    notify.send_digest(dict(_stats(), by_source=rows), _top())
+    body = _FakeSMTP.sent[0].get_body(preferencelist=("plain",)).get_content()
+    assert "contactable=0" in body
+    assert "found=6" in body

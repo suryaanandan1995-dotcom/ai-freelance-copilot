@@ -107,7 +107,66 @@ class Settings(BaseSettings):
     # for offline tests/dev, where fixture domains like "acme.io" don't resolve.
     verify_contact_domain: bool = True
 
-    # --- run-health alerting (see monitor/health.py) ---
+    # --- contact discovery (see outreach/discover.py) ---
+    # Measured over the 6 production runs of 2026-08-10..17: 269 leads cleared the fit
+    # bar and 196 carried an email, but only 7 were BOTH. The two sets are nearly
+    # disjoint — 181 of the 196 addresses came from hn_hiring (median fit 28, full-time
+    # employment posts) while 231 of the 269 qualified leads came from job boards that
+    # publish no address at all, because boards monetise the click. Contactability was
+    # entirely "did the post body happen to contain an address", so the good half of the
+    # funnel had no route. Discovery visits the *company's own site* and reads the
+    # address it publishes.
+    discover_contacts: bool = True
+    # Only ever for leads that already cleared the bar: discovery is HTTP, not LLM, but
+    # it is still someone else's server. A qualified-only trigger also means the fetch
+    # count tracks the useful half of the funnel (~40/run) and not the 175 raw leads.
+    max_contact_discoveries_per_run: int = 40
+    # Pages tried per company, in `outreach.discover.CONTACT_PATHS` order. 4 covers
+    # /contact, /contact-us, /about, /careers on every site tested; more is crawling.
+    max_pages_per_company: int = 4
+    discover_timeout_seconds: float = 8.0
+    # Whether a GUESSED domain may be emailed, as opposed to only proposed to the owner.
+    #
+    # Discovery has two paths. When the post lives on the company's own site, the domain
+    # is evidence and mail goes to the site that published the listing. When the post
+    # lives on a job board (which is the whole 262-lead population this exists for), the
+    # domain is *derived from the company name* — "Acme Corp" -> acme.com -> .io -> .ai —
+    # and accepted if the homepage answers and mentions the company.
+    #
+    # That second path was measured the first time it ever executed, by accident, from a
+    # unit test: it resolved a fixture's "Acme Corp" to the real acme.com, read the page,
+    # and returned frobozz07@mail.acme.com. A stranger, on the first try. Generic company
+    # names ("Apex", "Nova", "Summit") all have a .com owner who is not the client, and
+    # every one of them looks exactly like a hit to the mention check.
+    #
+    # Cold-emailing the wrong company is the one failure in this project that fixing the
+    # code afterwards cannot undo — a spam complaint burns the sending domain, and it
+    # takes the follow-up sequence and every already-contacted prospect with it. So the
+    # guessed half is surfaced in the digest for the owner to glance at, and not sent, and
+    # THAT is what produces the evidence to turn this on: a few weeks of proposed
+    # addresses a human can check for free beats an argument about the heuristic.
+    discover_send_to_guessed_domains: bool = False
+
+    # --- apply-yourself packs (see outreach/apply_pack.py) ---
+    # The 262 qualified-but-unreachable leads of that same window already reach the
+    # owner as a list of links (PR #19). A link is not a hand-off: applying still means
+    # re-reading the post and writing the pitch from scratch, 262 times. A pack turns
+    # each into a paste-and-submit. Capped because these are Opus drafts against a
+    # $5.00/run ceiling: 5 packs is ~$0.08 and covers the top of a sorted list.
+    apply_packs: bool = True
+    max_apply_packs_per_run: int = 5
+
+    # --- Reddit OAuth (see sources/reddit_forhire.py) ---
+    # r/forhire "[Hiring]" posts are the one high-volume source where a *client* posts
+    # *contract* work *with* a contact address — precisely the overlap the funnel lacks.
+    # The adapter has been disabled since 2026-08-03 because unauthenticated .json 403s
+    # from datacenter IPs (48/48 fetches). App-only OAuth fixes that and is free. The
+    # source auto-enables when both values are set; absent them it stays off rather
+    # than burning a fetch per run to be refused.
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+
+    # --- run-health alerting (checks in monitor/funnel.py, run by monitor/doctor.py) ---
     # Every one of 24 production runs reported "success" while sending nothing,
     # because "sent 0 emails" was never an error condition. These thresholds turn
     # a silently idle funnel into a failed run that emails the owner.

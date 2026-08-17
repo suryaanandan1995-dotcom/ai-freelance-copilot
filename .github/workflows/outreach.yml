@@ -41,6 +41,16 @@ jobs:
       # whose leads score p50 22 against a bar of 70.
       COPILOT_ADZUNA_APP_ID: ${{ secrets.COPILOT_ADZUNA_APP_ID }}
       COPILOT_ADZUNA_APP_KEY: ${{ secrets.COPILOT_ADZUNA_APP_KEY }}
+      # Reddit app-only OAuth for the r/forhire "[Hiring]" source. Unauthenticated
+      # reads 403 from datacenter IPs (48/48 fetches), which is why that adapter has
+      # been out of the registry since 2026-08-03. It is the one source where a client
+      # posts CONTRACT work WITH a contact address — the exact overlap the funnel lacks:
+      # over 2026-08-10..17, 269 leads cleared the bar and 196 carried an address but
+      # only 7 were both. The source stays out of the registry until BOTH values are
+      # set, so an unset secret costs nothing rather than burning a refused fetch.
+      # Free "script" app at https://www.reddit.com/prefs/apps.
+      COPILOT_REDDIT_CLIENT_ID: ${{ secrets.COPILOT_REDDIT_CLIENT_ID }}
+      COPILOT_REDDIT_CLIENT_SECRET: ${{ secrets.COPILOT_REDDIT_CLIENT_SECRET }}
       # REQUIRED for cross-run dedupe — a persistent hosted Postgres DSN. Without
       # a persistent DATABASE_URL the dedupe table resets each run and could
       # re-email people.

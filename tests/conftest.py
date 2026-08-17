@@ -43,6 +43,27 @@ _TEST_ENV: dict[str, str] = {
     "COPILOT_SMTP_USER": "",
     "COPILOT_SMTP_PASSWORD": "",
     "COPILOT_IMAP_HOST": "",
+    # These two decide the CONTENTS of the source registry: ``reddit_forhire`` joins it
+    # only when both are set. Unpinned, configuring the Reddit app locally turns
+    # tests/test_sources.py::test_get_default_sources_are_the_live_ones red by set
+    # equality — a green suite that goes red on a correct production change, which is
+    # exactly the leak this file exists to stop. Tests that want the source present set
+    # them explicitly instead.
+    "COPILOT_REDDIT_CLIENT_ID": "",
+    "COPILOT_REDDIT_CLIENT_SECRET": "",
+    # Contact discovery makes REAL outbound HTTP requests, and it is on by default in
+    # production. Left unpinned it ran during the offline suite and reached the live
+    # internet: a fixture lead for "Acme Corp" resolved acme.com, fetched its homepage
+    # and returned frobozz07@mail.acme.com — a stranger's address, from a unit test, in a
+    # suite whose whole premise is that it touches no network. Tests that exercise
+    # discovery turn it on and inject an httpx.MockTransport.
+    "COPILOT_DISCOVER_CONTACTS": "false",
+    # Apply packs are an extra Opus call per qualified-uncontactable lead, on by default in
+    # production. Left on here they spend an injected FakeChat's scripted responses inside
+    # tests that are counting model calls to prove something else entirely — the pre-gate
+    # test asserting "exactly one call: qualification" started reading 2. Tests that cover
+    # packs enable the flag themselves.
+    "COPILOT_APPLY_PACKS": "false",
 }
 
 

@@ -138,11 +138,45 @@ def check_queue_stalled() -> dict:
     }
 
 
-def check_contactable_supply() -> dict:
-    """Fail when the newest run found fewer contactable leads than the floor.
+def _actionable_count(latest: dict) -> int | None:
+    """Leads in a run that were BOTH over the fit bar and reachable, or None.
 
-    This is the leading indicator: proposals cannot be sent to leads that expose no
-    address, so a collapse here shows up ~a day before the send count drops.
+    ``None`` when the run predates the fields this needs — a missing input must report
+    that it measured nothing rather than return 0, which is a real measurement meaning
+    "the intersection was empty" and would fail the check on old rows.
+    """
+    fit = latest.get("fit") or {}
+    passed = fit.get("passed")
+    if passed is None:
+        # Pre-``fit`` runs: ``queued`` is the closest real proxy, since an uncontactable
+        # lead is drafted with ``draft_allowed=False`` and so never reaches the queue.
+        queued = latest.get("queued")
+        return None if queued is None else max(0, int(queued or 0))
+    unreachable = latest.get("apply_yourself")
+    if unreachable is None:
+        return None
+    return max(0, int(passed or 0) - len(unreachable))
+
+
+def check_contactable_supply() -> dict:
+    """Fail when the newest run produced too few leads that are BOTH good and reachable.
+
+    Measures the intersection, not ``contactable``, and that change is the whole point of
+    the check. Over the six runs of 2026-08-10..17 this check reported ``[ok] 29
+    contactable lead(s)`` on Friday 08-14 — on the third consecutive run that emailed
+    nobody, in a ten-day window that sent 6 emails against 269 qualified leads. Both
+    facts were true: there were 29 addresses, and none of them belonged to a lead worth
+    writing to. 181 of the window's 196 addresses came from ``hn_hiring`` (full-time
+    employment posts, median fit 28) while the qualified leads came from job boards that
+    publish no address at all, so raw contactability could sit at 28-47 per run forever
+    while sends stayed at zero.
+
+    A floor of 1 on a number that never drops is a check that cannot fail for the reason
+    it exists — the same shape as ``passed`` being read as success. The intersection is
+    the number that actually predicts a send: it was 1, 4, 0, 0, 0, 2 across the window,
+    against 6 emails. ``contactable`` is still reported in the detail, because the gap
+    between the two IS the diagnosis and a reader who sees only the intersection cannot
+    tell a sourcing collapse from a routing one.
     """
     from config import get_settings
 
@@ -183,10 +217,36 @@ def check_contactable_supply() -> dict:
                 "sourcing problem, not a prompt problem."
             ),
         }
+
+    actionable = _actionable_count(latest)
+    if actionable is None:
+        return {
+            "name": "contactable_supply",
+            "ok": True,
+            "detail": (
+                f"{count} contactable lead(s) in the latest run; "
+                "qualified-and-reachable not recorded for this run"
+            ),
+        }
+    if actionable < floor:
+        return {
+            "name": "contactable_supply",
+            "ok": False,
+            "detail": (
+                f"{count} contactable lead(s) but only {actionable} that also cleared the "
+                f"fit bar (floor {floor}). The addresses and the good leads are coming "
+                "from different sources, so the send count cannot rise by widening "
+                "queries or lowering the bar — see the run's Bottleneck line for which "
+                "sources sit on each side."
+            ),
+        }
     return {
         "name": "contactable_supply",
         "ok": True,
-        "detail": f"{count} contactable lead(s) in the latest run",
+        "detail": (
+            f"{actionable} qualified + reachable lead(s) of {count} contactable "
+            "in the latest run"
+        ),
     }
 
 
@@ -283,6 +343,83 @@ def check_reply_detection_alive() -> dict:
     }
 
 
+def check_discovery_productive() -> dict:
+    """Fail when contact discovery has looked up leads for days and found nothing.
+
+    Discovery is the intended fix for the largest loss in the funnel — 262 of the 269
+    qualified leads over 2026-08-10..17 had no address to send to — and it fails silently
+    by construction. It fetches other people's websites, so any of a blocked user-agent,
+    a robots.txt change, a world that has moved entirely onto hosted ATS domains, or a
+    bug in the extraction path produces the same thing: ``discovered: 0``, a run that
+    still exits 0, and an ``outreach_flow`` alert three days later pointing at sends.
+
+    The check is ATTEMPTS-gated. A run with zero attempts is not evidence of anything —
+    it means nothing qualified without an address, which is the good case — so it does
+    not count toward the streak. That distinction is the whole reason ``discovery_attempts``
+    is recorded next to ``discovered``: "found nothing" and "never looked" have opposite
+    fixes, and one number cannot say which happened.
+    """
+    from config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "discover_contacts", False):
+        return {
+            "name": "discovery",
+            "ok": True,
+            "detail": "contact discovery is disabled",
+        }
+    threshold = int(getattr(settings, "alert_after_zero_email_runs", 3) or 3)
+    try:
+        stats = _recent_stats(limit=max(threshold * 2, 10))
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": "discovery",
+            "ok": False,
+            "detail": f"could not read run history: {exc}",
+        }
+
+    tried = 0
+    found = 0
+    runs_that_looked = 0
+    for run in stats:
+        try:
+            attempts = int(run.get("discovery_attempts", 0) or 0)
+            hits = int(run.get("discovered", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if attempts <= 0:
+            continue
+        runs_that_looked += 1
+        tried += attempts
+        found += hits
+
+    if runs_that_looked < threshold:
+        return {
+            "name": "discovery",
+            "ok": True,
+            "detail": (
+                f"only {runs_that_looked} run(s) have attempted discovery "
+                f"({tried} lookup(s)) — too early to judge"
+            ),
+        }
+    if found == 0:
+        return {
+            "name": "discovery",
+            "ok": False,
+            "detail": (
+                f"{tried} lookup(s) across {runs_that_looked} runs found 0 addresses. "
+                "Discovery is running and producing nothing: check that the fetches are "
+                "not being refused (user-agent, robots.txt) before concluding companies "
+                "publish no addresses."
+            ),
+        }
+    return {
+        "name": "discovery",
+        "ok": True,
+        "detail": f"{found} address(es) from {tried} lookup(s) across {runs_that_looked} runs",
+    }
+
+
 def funnel_checks() -> list[dict]:
     """All funnel-health checks, shaped like ``monitor.doctor`` checks."""
     return [
@@ -290,4 +427,5 @@ def funnel_checks() -> list[dict]:
         check_queue_stalled(),
         check_outreach_stalled(),
         check_reply_detection_alive(),
+        check_discovery_productive(),
     ]

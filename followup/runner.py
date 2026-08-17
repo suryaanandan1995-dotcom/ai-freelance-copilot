@@ -78,10 +78,15 @@ def run_followups(chat=None) -> dict:
     # follow-ups: this used to count only follow-ups while the pipeline separately
     # counted only cold emails, so neither could see the other and a cap of 20 allowed
     # 40 sends from one mailbox. See outreach/quota.py.
-    from outreach.quota import remaining_today
+    # ``effective_cap`` ramps the configured ceiling toward what the mailbox has already
+    # proven it can send, so contact discovery cannot turn a supply jump into a volume
+    # step change. See outreach/quota.effective_cap.
+    from outreach.quota import effective_cap, remaining_today
 
     with get_session() as session:
-        remaining = remaining_today(session, settings.max_emails_per_day)
+        remaining = remaining_today(
+            session, effective_cap(session, settings.max_emails_per_day)
+        )
 
     with get_session() as session:
         candidates = (
