@@ -152,6 +152,243 @@ def test_noreply_is_still_rejected_when_verification_is_off(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# find_deliverable_email_with_reason — the missing denominator inside a lead
+#
+# ``pipeline`` recorded one skip reason, ``no_email_pregate``, for every lead it could
+# not write to, and over the 6 production runs of 2026-08-10..17 that counter read
+# **851 of 1047 leads**. It summed three outcomes with opposite fixes: no address was
+# published (buy a different lead source), an address was published and our own gate
+# refused it (fix this module — recoverable at zero acquisition cost), or an address
+# passed the gate onto a domain with no MX/A records (nothing can fix it). The tests
+# below pin the vocabulary, because these strings are report keys: a renamed reason
+# silently zeroes a row in the funnel report rather than failing anything.
+#
+# Same shape as two fixes this project already shipped a layer up — ``last_error``
+# separated "the API rejected us" from "nothing matched", ``LeadSource.scanned``
+# separated "nothing matched" from "the feed was empty".
+# --------------------------------------------------------------------------- #
+def _lead_with_raw(i: int, desc: str, raw: dict) -> Lead:
+    """A lead whose ``raw`` payload also carries text, like every real source.
+
+    Kept separate from :func:`_lead` so the existing fixtures stay byte-identical.
+    """
+    lead = _lead(i, desc)
+    lead.raw = raw
+    return lead
+
+
+def test_a_reachable_address_reports_the_found_reason_alongside_it(monkeypatch):
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+
+    email, reason = extract.find_deliverable_email_with_reason(
+        _lead(30, "Secure our EKS. Email jobs@good.io to apply.")
+    )
+    assert (email, reason) == ("jobs@good.io", "found")
+
+
+def test_a_post_with_no_address_at_all_is_a_lead_source_problem(monkeypatch):
+    """``no_address_in_post`` is the one reason whose lever is outside this module.
+
+    Measured 2026-08-07: ``contract_jobs`` fetched 36 Adzuna listings scoring up to 78
+    and published zero addresses, because the listing IS an apply form. No amount of
+    gate loosening reaches those leads; only a different feed does.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+
+    assert extract.find_deliverable_email_with_reason(
+        _lead(31, "Great role. Apply on our careers page.")
+    ) == (None, "no_address_in_post")
+
+
+def test_an_institutional_mailbox_is_reported_as_our_own_gate_rejecting_it(monkeypatch):
+    """``rejected_non_hiring`` is the recoverable slice — the address exists.
+
+    This is the number that decides whether there are hundreds of reachable leads
+    hiding in the 851 or none, so it must not be folded into "no address".
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+
+    for desc in (
+        "Questions about the role? support@corp.com",
+        "Data requests: privacy@corp.com",
+        # A bounce local and a template local land in the same bucket on purpose:
+        # the string looked like an address and is not a person we can pitch, and
+        # the lever for all of them is this module's reject lists.
+        "Automated posting: no-reply@corp.com",
+        "Get in touch directly via first.last@corp.com",
+    ):
+        assert extract.find_deliverable_email_with_reason(_lead(32, desc)) == (
+            None,
+            "rejected_non_hiring",
+        ), desc
+
+
+def test_an_accommodations_desk_is_reported_as_a_do_not_contact_context(monkeypatch):
+    """``rejected_do_not_contact`` ranks above ``rejected_non_hiring`` because the
+    address got further: it passed every local-part check and only the surrounding
+    prose disqualified it. ``dana@corp.com`` is an ordinary human name, so no reject
+    list could ever have caught it — only the sentence gives it away.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+
+    assert extract.find_deliverable_email_with_reason(
+        _lead(33, "If you require an accommodation to apply, contact dana@corp.com")
+    ) == (None, "rejected_do_not_contact")
+
+
+def test_an_accepted_address_on_a_dead_domain_reports_that_nothing_can_fix_it(monkeypatch):
+    """``domain_refused_mail`` is the verdict with no lever, and that is the point.
+
+    The gate did its job, picked the hiring address, and the domain publishes no MX or
+    A records. Counting these separately is what stops someone loosening a gate that
+    was already right.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: d == "good.io")
+
+    assert extract.find_deliverable_email_with_reason(
+        _lead(34, "Hiring SRE — email jobs@deadmail.io")
+    ) == (None, "domain_refused_mail")
+
+
+def test_the_best_candidate_supplies_the_reason_when_several_fail_differently(monkeypatch):
+    """Reason priority: ``domain_refused_mail`` > ``rejected_non_hiring``.
+
+    This post is the ambiguous case the ordering exists for. Reporting the weaker
+    reason would say "our gate refused a support@ address" — sending someone to loosen
+    a filter that correctly preferred the ``jobs@`` line — when the truth is that the
+    right address was found and is undeliverable.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: d != "deadmail.io")
+
+    desc = "Questions? support@corp.com. To apply, email jobs@deadmail.io"
+    assert extract.find_deliverable_email_with_reason(_lead(35, desc)) == (
+        None,
+        "domain_refused_mail",
+    )
+
+    # And the support@ address never becomes the answer: give the same post a live
+    # domain and the hiring address wins outright, proving the reason above described
+    # the ranked winner rather than whichever candidate happened to fail last.
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+    assert extract.find_deliverable_email_with_reason(_lead(35, desc)) == (
+        "jobs@deadmail.io",
+        "found",
+    )
+
+
+def test_a_rejection_in_the_description_outranks_silent_boilerplate_in_raw(monkeypatch):
+    """Reasons fold across text blocks instead of last-one-wins.
+
+    A real lead's ``raw`` payload contributes a dozen address-free strings after the
+    description, so taking the final block's verdict would report
+    ``no_address_in_post`` — buy a new source — for a post that plainly printed
+    ``support@``. The recoverable slice would read as zero.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: True)
+
+    lead = _lead_with_raw(
+        36,
+        "Questions? support@corp.com",
+        {"company": "Corp", "location": "Remote", "how_to_apply": "Use the portal."},
+    )
+    assert extract.find_deliverable_email_with_reason(lead) == (
+        None,
+        "rejected_non_hiring",
+    )
+
+
+def test_disabled_verification_reports_found_rather_than_a_refused_domain(monkeypatch):
+    """The escape hatch means "this machine cannot answer the deliverability question".
+
+    Inventing ``domain_refused_mail`` for a question we never asked would put a
+    fabricated row in the report, so with ``verify_contact_domain=False`` an extracted
+    address is ``found`` and no resolver is consulted at all.
+    """
+    _settings(monkeypatch, verify_contact_domain=False)
+
+    def boom(domain):  # must never be called
+        raise AssertionError("DNS lookup attempted while verification is disabled")
+
+    monkeypatch.setattr(extract, "domain_accepts_mail", boom)
+    assert extract.find_deliverable_email_with_reason(
+        _lead(37, "email jobs@acme.io")
+    ) == ("jobs@acme.io", "found")
+
+    # Extraction still applies with DNS off — a rejection is still reported as one.
+    assert extract.find_deliverable_email_with_reason(
+        _lead(38, "Automated: no-reply@news.ycombinator.com")
+    ) == (None, "rejected_non_hiring")
+
+
+def test_every_unreachable_reason_is_named_so_a_report_can_seed_it_at_zero():
+    """The strings are report keys, and an absent key reads as "never happened".
+
+    That misreading is the whole 851-of-1047 defect, one level up, so the four
+    unreachable reasons are exported as a tuple in priority order and the rank table is
+    derived from that tuple — one ordering, stated once, rather than two lists that can
+    drift apart.
+    """
+    assert extract.CONTACT_REASONS == (
+        "domain_refused_mail",
+        "rejected_do_not_contact",
+        "rejected_non_hiring",
+        "no_address_in_post",
+    )
+    assert extract.REASON_FOUND == "found"
+    assert extract.REASON_FOUND not in extract.CONTACT_REASONS
+
+    # Priority is transitive and total across the four, most recoverable first.
+    for stronger, weaker in zip(
+        extract.CONTACT_REASONS, extract.CONTACT_REASONS[1:], strict=False
+    ):
+        assert extract._preferred_reason(stronger, weaker) == stronger
+        assert extract._preferred_reason(weaker, stronger) == stronger
+
+
+def test_the_wrappers_return_exactly_what_they_returned_before_the_refactor(monkeypatch):
+    """One decision, three entry points: the reason plumbing must be invisible.
+
+    ``pipeline`` calls ``find_deliverable_email`` twice and four test modules assert on
+    ``find_contact_email``; both are now wrappers that discard the reason, so this pins
+    the address half of the answer against representative inputs of each shape —
+    description, ``raw`` payload, ranked winner, obfuscated form, and each rejection.
+    """
+    _settings(monkeypatch, verify_contact_domain=True)
+    monkeypatch.setattr(extract, "domain_accepts_mail", lambda d: d != "deadmail.io")
+
+    cases = [
+        ("Secure our EKS. Email jobs@good.io to apply.", "jobs@good.io"),
+        ("Reach me at jane [at] acme [dot] io for the k8s gig.", "jane@acme.io"),
+        ("Questions? support@corp.com. To apply, email careers@corp.com", "careers@corp.com"),
+        ("Questions? support@corp.com", None),
+        ("If you require an accommodation, contact dana@corp.com", None),
+        ("Great role. Apply on our careers page.", None),
+    ]
+    for desc, expected in cases:
+        assert extract.find_contact_email(_lead(40, desc)) == expected, desc
+        # find_contact_email never consults DNS, so the two agree except on the one
+        # case the domain check is for.
+        assert extract.find_deliverable_email(_lead(40, desc)) == expected, desc
+
+    # The raw-payload path (Reddit/HN sources put the body there, not in description).
+    from_raw = _lead_with_raw(41, "No address in the body.", {"selftext": "ceo@foo.co"})
+    assert extract.find_contact_email(from_raw) == "ceo@foo.co"
+    assert extract.find_deliverable_email(from_raw) == "ceo@foo.co"
+
+    # ...and the one divergence: extraction succeeds, deliverability does not.
+    dead = _lead(42, "Hiring SRE — email jobs@deadmail.io")
+    assert extract.find_contact_email(dead) == "jobs@deadmail.io"
+    assert extract.find_deliverable_email(dead) is None
+
+
+# --------------------------------------------------------------------------- #
 # pipeline pre-gate — the expensive-work ordering fix
 # --------------------------------------------------------------------------- #
 class FakeSource:
@@ -283,7 +520,10 @@ def test_uncontactable_lead_is_scored_but_never_drafted(temp_db, monkeypatch):
     assert stats["uncontactable_skipped"] == 1
     assert stats["queued"] == 0
     assert stats["emailed"] == 0
-    assert stats["emailed_skipped"].get("no_email_pregate") == 1
+    # Reason-coded: the post published no address at all, which is a different lever from
+    # an address whose domain refuses mail. The single ``no_email_pregate`` key this
+    # replaced read 851 of 1047 leads and named none of them.
+    assert stats["emailed_skipped"].get("no_email_no_address_in_post") == 1
     # Exactly one call: qualification. Research, drafting and review never ran.
     assert chat.calls == 1
     # And the score is now visible to the funnel report, which is the whole point.
@@ -332,7 +572,7 @@ def test_mixed_batch_counts_both_sides(temp_db, monkeypatch):
 
     assert stats["contactable"] == 2
     assert stats["uncontactable_skipped"] == 2
-    assert stats["emailed_skipped"].get("no_email_pregate") == 2
+    assert stats["emailed_skipped"].get("no_email_no_address_in_post") == 2
 
 
 def test_pregate_is_off_when_not_auto_emailing(temp_db, monkeypatch):

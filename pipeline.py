@@ -59,6 +59,7 @@ def _maybe_email_lead(
     settings: Any,
     retriever: Any,
     chat: Any,
+    email_override: str | None = None,
 ) -> str:
     """Attempt one cold email for a freshly queued lead.
 
@@ -66,6 +67,13 @@ def _maybe_email_lead(
     (e.g. ``"no_email"``, ``"low_fit"``, ``"duplicate"``, ``"suppressed"``,
     ``"daily_cap"``, ``"send_failed"``). All guards (gate, fit, dedupe,
     suppression, daily cap) are enforced here. Never raises for control flow.
+
+    ``email_override`` is an address that did NOT come from the post body — today only
+    from ``outreach/discover.py``, which read it off the company's own site. It bypasses
+    extraction because there is nothing in the lead to extract; it bypasses NOTHING else.
+    Every remaining guard (fit, suppression, duplicate, daily cap) still applies, and
+    deliberately so: a discovered address is the one kind this system invents rather than
+    reads, so it is the last one that should get a shortcut around the suppression list.
     """
     from db.models import OutreachRecord
     from outreach.extract import find_deliverable_email
@@ -73,7 +81,7 @@ def _maybe_email_lead(
     from outreach.sender import send_outreach
     from outreach.suppression import is_suppressed
 
-    email = find_deliverable_email(lead)
+    email = (email_override or "").strip().lower() or find_deliverable_email(lead)
     if not email:
         return "no_email"
     if fit_score < settings.outreach_min_fit:
@@ -89,7 +97,14 @@ def _maybe_email_lead(
         )
         if already is not None:
             return "duplicate"
-        if _emails_today(session) >= settings.max_emails_per_day:
+        # The ramped ceiling, not the raw setting: ``max_emails_per_day`` is where volume
+        # may end up, and ``effective_cap`` is what today has earned. Applied on BOTH send
+        # paths — the follow-up runner already routes through it — because a ramp one
+        # channel can walk around is the per-channel cap bug again, and that one let a
+        # configured 20 send 40.
+        from outreach.quota import effective_cap
+
+        if _emails_today(session) >= effective_cap(session, settings.max_emails_per_day):
             return "daily_cap"
 
     from core.schemas import CompanyResearch, ScoredLead
@@ -114,12 +129,111 @@ def _maybe_email_lead(
     return "sent" if sent else "send_failed"
 
 
+def _domain_is_evidence(lead: Any, domain: str) -> bool:
+    """True when ``domain`` came from the post's own host rather than from a guess.
+
+    ``outreach.discover`` resolves a company domain two ways and the returned
+    ``DiscoveredContact`` does not distinguish them, so the caller re-derives it: a
+    discovered domain that matches the registrable domain of ``lead.url`` means the
+    listing was published on that site, which is evidence. Anything else was derived from
+    the company NAME, and a name is not an identifier — see
+    ``settings.discover_send_to_guessed_domains``.
+
+    The classification lives here, next to the send decision, rather than inside
+    discovery: discovery's job is to find candidates, and only the caller knows whether it
+    is about to mail one. Errors resolve to False, because "we could not tell where this
+    address came from" must not read as "the post vouched for it".
+    """
+    if not domain:
+        return False
+    try:
+        from outreach.discover import _host_of, _registrable
+
+        host = _host_of(getattr(lead, "url", "") or "")
+        if not host:
+            return False
+        return _registrable(host) == _registrable(domain)
+    except Exception as exc:  # pragma: no cover - import/parse guard
+        logger.warning("could not classify discovered domain %s: %s", domain, exc)
+        return False
+
+
+def _contact_overlap_note(rows: dict[str, dict] | None, threshold: int) -> str:
+    """Name the sources on each side of the qualified/contactable split, or ''.
+
+    ``blocked_no_contact`` established THAT the leads clearing the bar are unreachable.
+    It cannot say why, and the why is not a property of the run — it is a property of
+    which sources are in the mix. Deriving it took a manual pull of six runs' logs; this
+    makes it a line in every digest instead.
+
+    Measured over 2026-08-10..17 (6 runs, 1047 new leads), qualified vs contactable per
+    source: contract_jobs 79/0, jobicy 76/14, remote_boards 76/1, working_nomads 17/0,
+    contra_startup 14/0, hn_hiring 7/181. Two populations, barely intersecting: 181 of
+    the 196 addresses came from ``hn_hiring``, whose posts are full-time employment ads
+    with a median fit of 28, while 231 of the 269 qualified leads came from job boards
+    that publish no address because they monetise the click. The per-run overlap was
+    1, 4, 0, 0, 0, 2 — so the entire send volume rode on roughly one lead a day, and on
+    the three zero days it was a coin flip over a set of size one.
+
+    That distinction matters because the two halves have different levers, and the
+    aggregate hides both: widening queries cannot make a board publish an address, and
+    lowering the threshold only admits more addressless board leads. The fix is either a
+    source that carries both (``reddit_forhire``) or discovery of the address ourselves
+    (``outreach/discover.py``) — neither of which is suggested by "leads are clearing
+    the bar" or by a bare unreachable count.
+    """
+    if not rows:
+        return ""
+    # A source "qualifies but cannot be reached" only counts at 3+ passing leads: at one
+    # or two, no contactable is ordinary luck rather than a property of the feed.
+    #
+    # The test is a RATIO, not ``contactable == 0``. Exact zero missed the clearest case
+    # in the measured window: ``remote_boards`` put 76 leads over the bar and supplied
+    # exactly ONE address, which is the same structural finding as Adzuna's 79-and-none
+    # but fell outside a strict-zero test on the strength of a single lucky post. So the
+    # note reports the real address count instead of implying none — a reader who is
+    # being told which half of the funnel is unreachable is owed the actual number.
+    mute: list[tuple[int, str]] = []
+    mute_contacts = 0
+    for name, row in rows.items():
+        passed = int(row.get("passed") or 0)
+        contactable = int(row.get("contactable") or 0)
+        if passed >= 3 and contactable <= max(1, passed // 20):
+            mute.append((passed, name))
+            mute_contacts += contactable
+    # The mirror image: a source supplying real address volume whose leads almost never
+    # clear the bar. Its p50 is the evidence that this is the wrong KIND of work rather
+    # than a scoring bug, so it is quoted.
+    talkers: list[tuple[int, str, object]] = []
+    for name, row in rows.items():
+        contactable = int(row.get("contactable") or 0)
+        passed = int(row.get("passed") or 0)
+        if contactable >= 5 and passed <= max(1, contactable // 10):
+            talkers.append((contactable, name, row.get("p50")))
+    if not (mute and talkers):
+        return ""
+    mute.sort(reverse=True)
+    talkers.sort(reverse=True)
+    mute_total = sum(p for p, _ in mute)
+    mute_names = ", ".join(n for _, n in mute[:3])
+    c, t_name, t_p50 = talkers[0]
+    p50_txt = f", median fit {t_p50}" if t_p50 is not None else ""
+    return (
+        f" The two halves are different sources: {mute_total} qualified lead(s) came from "
+        f"{mute_names}, which supplied {mute_contacts} address(es) between them, while "
+        f"{t_name} supplied {c} address(es) that almost never clear "
+        f"{threshold}{p50_txt}. Neither a wider query nor a lower bar can close that gap "
+        "— only a source carrying both, or discovering the address."
+    )
+
+
 def _fit_summary(
     scores: list[int],
     threshold: int,
     unscored: int = 0,
     budget_exhausted: bool = False,
     blocked_no_contact: int = 0,
+    source_rows: dict[str, dict] | None = None,
 ) -> dict:
     """Summarise the run's fit-score distribution and name the likely bottleneck.
 
@@ -212,6 +326,7 @@ def _fit_summary(
             f"carry no email address, so automation could act on {reachable}. They are "
             "listed under APPLY YOURSELF — this is a channel limit, not a targeting "
             "problem, so changing queries or the threshold will not raise the send count."
+            + _contact_overlap_note(source_rows, threshold)
         )
     elif passed:
         bottleneck = "none — leads are clearing the bar"
@@ -303,6 +418,10 @@ def _per_source_summary(rows: dict[str, dict], threshold: int) -> dict:
             "considered": considered,
             "new": row.get("new", 0),
             "contactable": row.get("contactable", 0),
+            # Kept beside ``contactable`` and never folded into it: "this feed publishes
+            # addresses" and "we found one anyway" are different facts about the source,
+            # and only the first is an argument for fetching more from it.
+            "discovered": row.get("discovered", 0),
             "queued": row.get("queued", 0),
             "scored": len(scores),
         }
@@ -444,6 +563,20 @@ def run_pipeline(
     # to job forms breaks platform ToS), so a human hand-off is the ONLY route these
     # leads have, which is exactly why they must be surfaced rather than dropped.
     apply_yourself: list[dict] = []
+    # Addresses found on the company's own site for leads whose POST carried none, and
+    # how many leads we spent lookups on. Counted separately from ``contactable`` on
+    # purpose: ``contactable`` means "the listing published an address", and that is the
+    # measurement the whole qualified-vs-reachable diagnosis rests on — 196 contactable
+    # against 269 qualified with an overlap of 7. Folding discovered addresses into it
+    # would make the split it exposes disappear from the report that exposed it, while
+    # the underlying feeds stayed exactly as unreachable as before.
+    discovered = 0
+    discovery_attempts = 0
+    # Addresses found on a domain GUESSED from the company name. Shown to the owner, not
+    # mailed (see settings.discover_send_to_guessed_domains). A one-line hand-off — the
+    # address and the page it came from — is enough for a human to accept or bin in two
+    # seconds, and it is the only way the guessed path ever earns the right to send.
+    proposed_contacts: list[dict] = []
     # Every fit score seen this run. Without this, "dropped: 34" is unactionable:
     # a run cannot tell you whether 34 leads scored 68 (threshold too strict) or 12
     # (sources off-ICP), which are opposite fixes. Recorded so min_fit_score can be
@@ -460,6 +593,7 @@ def run_pipeline(
                 "considered": 0,
                 "new": 0,
                 "contactable": 0,
+                "discovered": 0,
                 "queued": 0,
                 "scores": [],
             },
@@ -552,10 +686,17 @@ def run_pipeline(
             # discovering it for free. Only applies when auto-emailing is the goal —
             # with auto_email off, drafts for human submission are still valuable.
             has_contact = False
+            # Why the address is missing, not just that it is. ``no_email_pregate`` read
+            # 851 of 1047 leads across 2026-08-10..17 — a number no decision can be made
+            # from, because "the post published no address" (fix: discover it, or change
+            # sources) and "we ranked an address whose domain refuses mail" (fix: the
+            # ranking, or the MX gate) are opposite problems sharing one counter.
+            contact_reason = "unknown"
             try:
-                from outreach.extract import find_deliverable_email
+                from outreach.extract import find_deliverable_email_with_reason
 
-                has_contact = find_deliverable_email(lead) is not None
+                found_email, contact_reason = find_deliverable_email_with_reason(lead)
+                has_contact = found_email is not None
             except Exception as exc:  # extraction must never break the loop
                 logger.warning("contact pre-check failed for %s: %s", lead.url, exc)
             draft_allowed = True
@@ -576,7 +717,9 @@ def run_pipeline(
                 #
                 # Score it, draft nothing, and let the funnel report say which it was.
                 uncontactable_skipped += 1
-                _skip_email("no_email_pregate")
+                # Reason-coded, one key per lever. The ``no_email_`` prefix is kept so the
+                # digest still groups them together and an old run's logs stay comparable.
+                _skip_email(f"no_email_{contact_reason}")
                 draft_allowed = False
 
             try:
@@ -597,10 +740,95 @@ def run_pipeline(
                 if fit_score >= settings.min_fit_score:
                     metrics.inc("leads_qualified_total")
 
+            # --- second chance: find the address ourselves -------------------
+            # Only for leads that ALREADY cleared the bar, which is why this cannot live
+            # in the pre-gate above: discovery costs up to a dozen HTTP requests against
+            # a stranger's website, and 778 of the 1047 leads in the measured window were
+            # never worth one. Here the population is the 269 that qualified, of which 262
+            # had nowhere to send anything — the largest single loss in the funnel, and the
+            # only one where the missing thing is a fact about the world rather than a
+            # decision we made.
+            email_override: str | None = None
+            if (
+                not has_contact
+                and fit_score >= settings.min_fit_score
+                and getattr(settings, "discover_contacts", False)
+                and discovery_attempts
+                < getattr(settings, "max_contact_discoveries_per_run", 0)
+            ):
+                discovery_attempts += 1
+                try:
+                    from outreach.discover import discover_contact
+
+                    hit = discover_contact(lead)
+                except Exception as exc:  # discovery must never break the lead loop
+                    logger.warning("contact discovery failed for %s: %s", lead.url, exc)
+                    hit = None
+                if hit is not None and not _domain_is_evidence(lead, hit.domain):
+                    # The domain was GUESSED from the company name, not taken from the
+                    # post's own host. See settings.discover_send_to_guessed_domains: the
+                    # first live execution of that path returned a stranger's address, so
+                    # the address is handed to the owner instead of mailed. Recorded as a
+                    # discovery either way — it is a real find, and hiding it would make
+                    # the guessed path unevaluable, which is the reason it stays off.
+                    proposed_contacts.append(
+                        {
+                            "email": hit.email,
+                            "domain": hit.domain,
+                            "source_url": hit.source_url,
+                            "title": lead.title,
+                            "company": lead.company or "",
+                            "lead_url": lead.url,
+                            "fit_score": fit_score,
+                        }
+                    )
+                    if not getattr(settings, "discover_send_to_guessed_domains", False):
+                        logger.info(
+                            "proposing (not sending) %s for %s — domain guessed from the"
+                            " company name, not from %s",
+                            hit.email,
+                            lead.company,
+                            lead.url,
+                        )
+                        hit = None
+                if hit is not None:
+                    email_override = hit.email
+                    has_contact = True
+                    discovered += 1
+                    _src(lead.source)["discovered"] += 1
+                    logger.info(
+                        "discovered %s for %s via %s", hit.email, lead.company, hit.source_url
+                    )
+                    # The lead was scored with ``draft_allowed=False``, so there is no
+                    # proposal to send — it has to be re-run now that there is somewhere
+                    # to send one. That repeats the qualify call, which is the cheap
+                    # Sonnet stage; the alternative is threading a resume point through
+                    # the graph to save cents on at most ``max_contact_discoveries_per_run``
+                    # leads a day, and a second entry point into the graph is a far more
+                    # expensive thing to own than a duplicated cheap call.
+                    try:
+                        state = run_lead(
+                            lead, retriever=retriever, chat=chat, draft_allowed=True
+                        )
+                    except BudgetExhausted:
+                        budget_exhausted = True
+                        logger.warning(
+                            "budget exhausted at $%.4f — stopping run", tracker.usd()
+                        )
+                        break
+                    rescored = state.get("scored") or {}
+                    if rescored:
+                        # The score is REPLACED, not appended. ``fit_scores`` is one row
+                        # per lead and it is the sample the min_fit_score decision is made
+                        # from, so a lead counted twice would drag that median toward
+                        # whatever happens to get discovered.
+                        fit_score = int(rescored.get("fit_score", fit_score))
+
             # A qualified lead with no email is not a dead lead, it is a lead the owner
             # applies to by hand. Captured BEFORE the disposition check below, because an
             # uncontactable lead never reaches "queue" — that is precisely why these were
-            # invisible.
+            # invisible. Discovery runs first, so a lead only lands here once automation
+            # has genuinely run out of routes.
             if not has_contact and fit_score >= settings.min_fit_score:
                 apply_yourself.append(
                     {
@@ -609,6 +837,12 @@ def run_pipeline(
                         "company": lead.company or "",
                         "source": lead.source,
                         "fit_score": fit_score,
+                        # Carried so the digest can say WHY it is being handed over. An
+                        # "apply by hand" list with no reason invites the reader to assume
+                        # the sources are bad, when 3 of the 4 reasons are ours to fix.
+                        "contact_reason": contact_reason,
+                        # For the apply pack: the model needs the post to write the note.
+                        "description": (lead.description or "")[:4000],
                     }
                 )
 
@@ -672,6 +906,7 @@ def run_pipeline(
                         settings=settings,
                         retriever=retriever,
                         chat=chat,
+                        email_override=email_override,
                     )
                     if result == "sent":
                         emailed += 1
@@ -690,6 +925,16 @@ def run_pipeline(
         # proposal quality matters if nothing is reachable. Surfaced as a top-level
         # stat (not buried in emailed_skipped) so the weekly review can act on it.
         "contactable": contactable,
+        # Both numbers, always. ``discovered`` alone cannot be read: 0 of 0 attempts means
+        # nothing qualified without an address (good), 0 of 40 means discovery ran and
+        # found nothing (a broken selector, a blocked user-agent, an ATS-hosted world) —
+        # and a zero with no denominator has already sent this project down the wrong
+        # lever more than once.
+        "discovered": discovered,
+        "discovery_attempts": discovery_attempts,
+        "proposed_contacts": sorted(
+            proposed_contacts, key=lambda r: r.get("fit_score", 0), reverse=True
+        ),
         "uncontactable_skipped": uncontactable_skipped,
         "queued": queued,
         "dropped": dropped,
@@ -715,14 +960,56 @@ def run_pipeline(
     # ``blocked_no_contact`` is the apply-yourself list, which by construction is exactly
     # "cleared the bar, has no address". Passed in rather than re-derived so the headline
     # bottleneck and that section can never disagree about the same run.
+    # Computed BEFORE the fit summary because the contacts bottleneck now names the
+    # sources on each side of the split, and those counts live in these rows.
+    stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
     stats["fit"] = _fit_summary(
         fit_scores,
         settings.min_fit_score,
         unscored=max(0, new - len(fit_scores)),
         budget_exhausted=budget_exhausted,
         blocked_no_contact=len(apply_yourself),
+        source_rows=stats["by_source"],
     )
-    stats["by_source"] = _per_source_summary(by_source, settings.min_fit_score)
+
+    # --- paste-and-submit packs for the hand-off ---------------------------------
+    # Built here, after the stats are assembled, because the input is the SORTED
+    # apply-yourself list: the cap has to cut the lowest scores, and only this list is
+    # ordered. Costs ~$0.013 a pack against a ~$2.30 run, and it is the difference
+    # between handing the owner 262 links and handing over work that was already paid
+    # for in a form they can submit. Never raises by contract; wrapped anyway, because
+    # nothing about a digest extra may cost a run its stats.
+    stats["apply_packs"] = []
+    if getattr(settings, "apply_packs", False) and stats["apply_yourself"]:
+        # The tracker is RE-INSTALLED for this, and ``cost_usd`` re-read afterwards. The
+        # ``finally`` above uninstalls it, so building packs here without this would be a
+        # model call that no budget gates and no run reports: the same shape as every
+        # other guard in this project that reported success while not doing its job, only
+        # this one costs money per run forever. Same tracker instance, so the packs spend
+        # the REMAINING budget rather than getting a fresh $5.00.
+        set_cost_tracker(tracker)
+        try:
+            from outreach.apply_pack import build_apply_packs
+
+            packs = build_apply_packs(
+                stats["apply_yourself"],
+                retriever=retriever,
+                chat=chat,
+                limit=getattr(settings, "max_apply_packs_per_run", 5),
+            )
+            stats["apply_packs"] = [
+                {"text": pack.to_text(), "html": pack.to_html()} for pack in packs
+            ]
+        except BudgetExhausted:
+            # The run's spend ceiling, hit while writing packs. Not an error: the leads
+            # are still in apply_yourself and still get their links.
+            stats["budget_exhausted"] = True
+            logger.warning("apply packs skipped: run budget exhausted")
+        except Exception as exc:  # pragma: no cover - build_apply_packs never raises
+            logger.warning("apply pack build failed: %s", exc)
+        finally:
+            set_cost_tracker(None)
+            stats["cost_usd"] = tracker.usd()
 
     if notify:
         try:

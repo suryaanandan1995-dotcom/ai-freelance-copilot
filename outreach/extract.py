@@ -468,10 +468,106 @@ def _cue_score(text: str, start: int, end: int) -> int:
     return 1 if _HIRING_CUE_RE.search(window) else 0
 
 
-def _best_email_in(text: str) -> str | None:
-    """Best acceptable address in one block of text, or ``None``.
+# --- why there is no address, not just that there isn't one ----------------------
+#
+# ``pipeline`` recorded a single skip reason, ``no_email_pregate``, for every lead it
+# could not write to. Across the 6 production runs of 2026-08-10..17 that counter read
+# **851 of 1047 leads** — 81% of everything fetched — and it was unactionable, because
+# it summed three outcomes whose fixes point in opposite directions:
+#
+#   * the post published no address at all → the lever is a different LEAD SOURCE
+#     (Adzuna/ATS listings carry an apply form and nothing else, measured 2026-08-07);
+#   * an address was there and OUR OWN GATE refused it → the lever is this module, and
+#     the pool is recoverable today at zero acquisition cost;
+#   * an address was there, we accepted it, and its domain publishes no MX/A record →
+#     the lever is NOTHING. That address is undeliverable no matter what we change.
+#
+# Without the split we cannot tell whether hundreds of the 851 are recoverable or none
+# of them are, and those two worlds justify completely different work. This is the same
+# missing-denominator bug this project has now fixed twice at higher layers —
+# ``last_error`` separated "the API rejected us" from "nothing matched", and
+# ``LeadSource.scanned`` separated "nothing matched" from "the feed was empty". This is
+# one level further down: inside a single lead.
+#
+#: Reason strings, ordered **most recoverable / most specific first**. Two things read
+#: this order and they must not disagree, so the rank table below is derived from the
+#: tuple rather than written out a second time (six stages each writing their own
+#: comparison is a bug class this codebase has paid for).
+#:
+#: Why THIS order when several candidate addresses in one post each fail differently:
+#: report the reason belonging to the BEST candidate, i.e. the one that got furthest
+#: through the gate, because that is the only reason that names a lever we could pull.
+#: A post carrying both ``support@acme.com`` and ``jobs@no-mx.example`` is NOT a
+#: "we have no address" lead and it is NOT a "our gate is too strict" lead — the gate
+#: did its job and picked the hiring address; the address is simply dead. Reporting the
+#: weaker ``rejected_non_hiring`` there would send someone to loosen a gate that was
+#: already right, and reporting ``no_address_in_post`` would send someone to buy a new
+#: lead source we do not need. ``domain_refused_mail`` is first because it is the one
+#: verdict that closes the lead permanently; ``no_address_in_post`` is last because it
+#: is the least informative thing we can say about a post that plainly had an address.
+REASON_FOUND = "found"
+REASON_DOMAIN_REFUSED_MAIL = "domain_refused_mail"
+REASON_REJECTED_DO_NOT_CONTACT = "rejected_do_not_contact"
+REASON_REJECTED_NON_HIRING = "rejected_non_hiring"
+REASON_NO_ADDRESS_IN_POST = "no_address_in_post"
 
-    Ranking, highest first — a *later* hiring address beats an *earlier* generic one,
+#: Every reason a lead can be *unreachable* for, most recoverable first. Exported so a
+#: report can pre-seed all four keys at zero: an absent key reads as "this never
+#: happened" when it usually means "nobody counted", which is the exact failure the
+#: 851 figure above is an instance of.
+CONTACT_REASONS: tuple[str, ...] = (
+    REASON_DOMAIN_REFUSED_MAIL,
+    REASON_REJECTED_DO_NOT_CONTACT,
+    REASON_REJECTED_NON_HIRING,
+    REASON_NO_ADDRESS_IN_POST,
+)
+
+#: Higher wins. Derived from :data:`CONTACT_REASONS` so the ordering is stated once.
+_REASON_RANK: dict[str, int] = {
+    reason: len(CONTACT_REASONS) - i for i, reason in enumerate(CONTACT_REASONS)
+}
+
+
+def _preferred_reason(a: str, b: str) -> str:
+    """The more recoverable of two failure reasons — see :data:`CONTACT_REASONS`.
+
+    Used to fold many candidate addresses (and many text blocks) down to the single
+    verdict a report can act on. Unknown strings rank 0 so a future reason added to
+    only one of the two lists degrades to "the known one wins" instead of crashing.
+    """
+    return a if _REASON_RANK.get(a, 0) >= _REASON_RANK.get(b, 0) else b
+
+
+def _best_email_in_with_reason(text: str) -> tuple[str | None, str]:
+    """:func:`_best_email_in`, plus WHY when it returns ``None``.
+
+    This is the **single** implementation of the address decision; every other entry
+    point in this module is a wrapper that throws part of the answer away. Keeping one
+    copy is not tidiness: the gate is five interacting checks (bounce locals,
+    institutional locals, placeholder templates, bad domains, do-not-contact prose) and
+    a second code path that re-asked any of them would drift from this one silently,
+    which is precisely how a report ends up confidently blaming the wrong lever.
+
+    Reason semantics, in the order the checks run per candidate:
+
+    * ``rejected_non_hiring`` — the address failed :func:`_is_good_email`. That covers
+      the institutional locals this reason is named for (``support@``, ``privacy@``)
+      and also the bounce locals, placeholder templates and asset/example domains,
+      all of which are "the string looked like an address but is not a person you can
+      pitch". They share a lever (this module's reject lists), so they share a key.
+    * ``rejected_do_not_contact`` — the address passed :func:`_is_good_email` but the
+      surrounding prose routes it elsewhere (accommodations desk, fraud report, data
+      request). Checked second because it needs the match's POSITION, and ranked above
+      the previous one because it is the more specific statement about a better address.
+    * ``no_address_in_post`` — the regex matched nothing at all in this block.
+
+    ``domain_refused_mail`` is deliberately NOT produced here: deliverability is a
+    property of the winning address, decided once in
+    :func:`find_deliverable_email_with_reason`, and this function is also used on paths
+    (``find_contact_email``) where no DNS check happens at all.
+
+    Ranking of the *acceptable* candidates, highest first — a *later* hiring address
+    beats an *earlier* generic one,
     which is the whole point: a compliance footer at char 400 must not beat the
     ``careers@`` line at char 6,000.
 
@@ -493,10 +589,16 @@ def _best_email_in(text: str) -> str | None:
         variants.append(deob)
 
     best: tuple[int, int, str] | None = None
+    # Starts at the weakest verdict and only ever climbs, via _preferred_reason: with
+    # zero regex matches this is the honest answer, and any candidate at all overrides
+    # it. Never assigned directly after this line, so no branch can accidentally
+    # downgrade a specific verdict back to "no address".
+    reason = REASON_NO_ADDRESS_IN_POST
     for variant in variants:
         for order, match in enumerate(_EMAIL_RE.finditer(variant)):
             email = match.group(0).lower().strip(".,;:<>()[]\"'")
             if not _is_good_email(email):
+                reason = _preferred_reason(reason, REASON_REJECTED_NON_HIRING)
                 continue
             if _is_do_not_contact(variant, match.start(), match.end()):
                 # The prose says this mailbox is for accommodations / fraud reports /
@@ -504,6 +606,7 @@ def _best_email_in(text: str) -> str | None:
                 # _is_good_email because it needs the address's POSITION in the text,
                 # which is the only thing that distinguishes "the careers@ line" from
                 # "the careers@ in the fraud warning".
+                reason = _preferred_reason(reason, REASON_REJECTED_DO_NOT_CONTACT)
                 continue
             local, _, _domain = email.partition("@")
             rank = 2 if _is_hiring_local(local) else _cue_score(
@@ -514,27 +617,62 @@ def _best_email_in(text: str) -> str | None:
             if best is None or scored > best:
                 best = scored
         # The raw variant already yielded a winner; the de-obfuscated copy is a
-        # fallback for text that hid its address, not a second opinion.
+        # fallback for text that hid its address, not a second opinion. Note the
+        # rejection reasons from the raw pass are deliberately KEPT when we fall
+        # through to the de-obfuscated one: "support@ was there and we refused it" is
+        # still true of the post whichever spelling of the text we read it in.
         if best is not None:
             break
-    return best[2] if best else None
+    if best is not None:
+        return best[2], REASON_FOUND
+    return None, reason
+
+
+def _best_email_in(text: str) -> str | None:
+    """Best acceptable address in one block of text, or ``None``.
+
+    Thin wrapper that discards the reason. It stays a separate name because callers
+    (and one behavioural test pinning the placeholder-vs-real ranking) only ever cared
+    about the address; see :func:`_best_email_in_with_reason` for the ranking rules and
+    the reason vocabulary.
+    """
+    return _best_email_in_with_reason(text)[0]
+
+
+def _contact_email_with_reason(lead: Lead) -> tuple[str | None, str]:
+    """Scan every text block of a lead: ``(address, reason)``.
+
+    Description before ``raw``: the human-written body is where a poster puts the
+    address they want used. Within a block, see
+    :func:`_best_email_in_with_reason` for why "best" replaced "first".
+
+    The first block that yields an address still wins outright — unchanged — so the
+    only new behaviour is the reason. Across blocks the reasons FOLD rather than
+    last-one-wins, because a lead's raw payload routinely contributes a dozen blocks of
+    boilerplate after the description: taking the final block's verdict would report
+    ``no_address_in_post`` for a post whose description clearly printed ``support@``,
+    which is the wrong lever (buy a new source) for a lead we already reach.
+    """
+    haystacks: list[str] = [lead.description or ""]
+    haystacks.extend(_iter_raw_strings(lead.raw or {}))
+
+    reason = REASON_NO_ADDRESS_IN_POST
+    for text in haystacks:
+        email, why = _best_email_in_with_reason(text)
+        if email:
+            return email, REASON_FOUND
+        reason = _preferred_reason(reason, why)
+    return None, reason
 
 
 def find_contact_email(lead: Lead) -> str | None:
     """Return the best valid contact email found in the lead, else ``None``.
 
-    Description before ``raw``: the human-written body is where a poster puts the
-    address they want used. Within a block, see :func:`_best_email_in` for why "best"
-    replaced "first".
+    Thin wrapper over :func:`_contact_email_with_reason`; the signature and the return
+    value are byte-for-byte what they were before the reason plumbing existed, which is
+    what lets ~40 existing assertions across four test modules stand unchanged.
     """
-    haystacks: list[str] = [lead.description or ""]
-    haystacks.extend(_iter_raw_strings(lead.raw or {}))
-
-    for text in haystacks:
-        email = _best_email_in(text)
-        if email:
-            return email
-    return None
+    return _contact_email_with_reason(lead)[0]
 
 
 # --- deliverability verification ------------------------------------------------
@@ -590,24 +728,57 @@ def domain_accepts_mail(domain: str) -> bool:
     return ok
 
 
-def find_deliverable_email(lead: Lead) -> str | None:
-    """Like :func:`find_contact_email`, but also require a mail-accepting domain.
+def find_deliverable_email_with_reason(lead: Lead) -> tuple[str | None, str]:
+    """``(address, reason)`` — the sendable address, or ``None`` and why not.
 
-    The DNS check is skipped when ``COPILOT_VERIFY_CONTACT_DOMAIN=false`` so that
-    the test suite (and offline dev) stays hermetic — fixture domains like
-    ``acme.io`` don't resolve, and a unit test must not depend on a resolver.
+    The reason is one of :data:`REASON_FOUND` or the four members of
+    :data:`CONTACT_REASONS`, and the strings are stable because they are report keys:
+    they replace the single ``no_email_pregate`` counter that read 851 of 1047 leads
+    over the 6 production runs of 2026-08-10..17 while naming no lever at all.
+
+    Deliverability is decided here and nowhere else, and it is decided LAST, on the one
+    address that already won ranking. Two consequences worth stating:
+
+    * ``domain_refused_mail`` outranks every other reason (see :data:`CONTACT_REASONS`)
+      but it can only be reached by an address that passed the whole gate, so the
+      ordering is not a tie-break so much as a description of how far the lead got.
+    * we do not fall back to the runner-up when the winner's domain is dead. That is
+      the pre-existing behaviour of this function and it is preserved on purpose — the
+      winner is the hiring address and a runner-up is by construction the generic or
+      uncued one, so "send to the second-best address on a domain we could not verify"
+      trades sender reputation, the one asset this system cannot rebuy, for a lead.
+      The reason string is what makes the trade visible: if ``domain_refused_mail``
+      turns out to be a large slice of the 851, that measurement is the argument for
+      revisiting it, which is exactly what the split exists to enable.
+
+    The DNS check is skipped when ``COPILOT_VERIFY_CONTACT_DOMAIN=false`` so that the
+    test suite (and offline dev) stays hermetic — fixture domains like ``acme.io``
+    don't resolve, and a unit test must not depend on a resolver. With verification off
+    the reason is ``found``, never ``domain_refused_mail``: the escape hatch means "this
+    machine cannot answer the deliverability question", and inventing a verdict for an
+    unasked question is how a report ends up confidently wrong.
     """
-    email = find_contact_email(lead)
+    email, reason = _contact_email_with_reason(lead)
     if not email:
-        return None
+        return None, reason
     try:
         from config import get_settings
 
         if not get_settings().verify_contact_domain:
-            return email
+            return email, REASON_FOUND
     except Exception:  # pragma: no cover - config unavailable: stay strict
         pass
     _, _, domain = email.partition("@")
     if not domain_accepts_mail(domain):
-        return None
-    return email
+        return None, REASON_DOMAIN_REFUSED_MAIL
+    return email, REASON_FOUND
+
+
+def find_deliverable_email(lead: Lead) -> str | None:
+    """Like :func:`find_contact_email`, but also require a mail-accepting domain.
+
+    Thin wrapper that discards the reason, so every existing caller (``pipeline`` calls
+    this twice) keeps its exact pre-refactor behaviour. New callers that report on why
+    a lead was unreachable should use :func:`find_deliverable_email_with_reason`.
+    """
+    return find_deliverable_email_with_reason(lead)[0]

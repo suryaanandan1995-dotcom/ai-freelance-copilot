@@ -127,9 +127,29 @@ def _source_lines(stats: dict) -> list[str]:
         f"fetched={row.get('fetched', 0):<4} "
         f"considered={row.get('considered', row.get('fetched', 0)):<4} "
         f"new={row.get('new', 0):<4} contactable={row.get('contactable', 0):<4} "
+        # Printed next to ``contactable``, never merged into it. The two columns answer
+        # different questions — "does this feed publish addresses" vs "can we find them
+        # anyway" — and a feed that publishes none is still the wrong feed to widen even
+        # when discovery rescues its leads.
+        f"found={row.get('discovered', 0):<3} "
         f"queued={row.get('queued', 0):<3} {row.get('verdict', '')}"
         for name, row in sorted(rows.items(), key=rank)
     ]
+
+
+def _discovered_li(stats: dict) -> str:
+    """The discovery line for the HTML digest, or '' when discovery did not run.
+
+    Omitted rather than shown as 0 when no lookups happened: a permanent "Discovered: 0"
+    row trains the reader to ignore it, and then the day discovery breaks it says exactly
+    what it said while working. Present means it ran, and it always carries the
+    denominator — 0 of 0 and 0 of 40 need opposite fixes.
+    """
+    attempts = int(stats.get("discovery_attempts") or 0)
+    if not attempts:
+        return ""
+    found = int(stats.get("discovered") or 0)
+    return f"  <li>Addresses discovered: {found} of {attempts} looked up</li>"
 
 
 def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
@@ -150,6 +170,16 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
         f"  Skipped     : {stats.get('skipped', 0)}",
         f"  Cost        : ${stats.get('cost_usd', 0.0):.4f}",
     ]
+    # Always with its denominator. "Discovered: 0" is unreadable on its own — 0 of 0 means
+    # every qualified lead already had an address, 0 of 40 means discovery ran forty times
+    # and failed, and this project has acted on the wrong one of those before.
+    attempts = stats.get("discovery_attempts")
+    if attempts:
+        lines.insert(
+            2,
+            f"  Discovered  : {stats.get('discovered', 0)} of {attempts} "
+            "qualified lead(s) with no published address",
+        )
     skipped_reasons = stats.get("emailed_skipped") or {}
     if skipped_reasons:
         reasons = ", ".join(f"{k}={v}" for k, v in sorted(skipped_reasons.items()))
@@ -198,6 +228,43 @@ def _plaintext(stats: dict, top_leads: list[dict], base_url: str) -> str:
             lines.append(f"      {lead.get('url', '')}")
         if len(apply) > _APPLY_SHOWN:
             lines.append(f"  ... {_dropped_note(apply)}")
+
+    # The packs, for the top few of that same list. A link is not a hand-off: applying
+    # still meant re-opening the post and writing the pitch from scratch, 262 times in the
+    # measured window. These are the highest-scoring ones with the note already written,
+    # so submitting is a paste rather than a rewrite. Rendered AFTER the list, not instead
+    # of it — the list is complete and the packs are a subset, and a reader who sees only
+    # 5 detailed blocks would reasonably assume there were only 5 leads.
+    packs = stats.get("apply_packs") or []
+    if packs:
+        lines += [
+            "",
+            f"READY TO PASTE — {len(packs)} of those {len(apply)}, best fit first:",
+        ]
+        for pack in packs:
+            lines += ["", str(pack.get("text") or "")]
+
+    # Addresses discovery found on a domain it GUESSED from the company name. Nothing was
+    # sent to these. They are here because a human can accept or bin one in two seconds
+    # from the address and the page it came from, and because a guessed address that is
+    # never shown can never be evaluated — the path stays off until these read right.
+    proposed = stats.get("proposed_contacts") or []
+    if proposed:
+        lines += [
+            "",
+            f"POSSIBLE ADDRESSES — {len(proposed)} found on a guessed company domain "
+            "(NOT emailed; check one and reply if they look right):",
+        ]
+        for item in proposed[:_APPLY_SHOWN]:
+            company = item.get("company") or ""
+            lines.append(
+                f"  - [{item.get('fit_score', 0)}] {item.get('email', '')}"
+                f"{f' — {company}' if company else ''}"
+            )
+            lines.append(f"      post: {item.get('lead_url', '')}")
+            lines.append(f"      from: {item.get('source_url', '')}")
+        if len(proposed) > _APPLY_SHOWN:
+            lines.append(f"  ... and {len(proposed) - _APPLY_SHOWN} more")
 
     lines += ["", "Nothing was submitted automatically — review and submit yourself."]
     return "\n".join(lines)
@@ -267,6 +334,50 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
         if apply_rows
         else ""
     )
+
+    # Paste-and-submit packs for the best of that list. ``ApplyPack.to_html`` escapes every
+    # remote string it interpolates (titles and companies come from third-party job posts),
+    # which is why this is the one place here that concatenates HTML it did not escape
+    # itself — see outreach/apply_pack.ApplyPack.to_html.
+    packs = stats.get("apply_packs") or []
+    pack_html = ""
+    if packs:
+        blocks = "".join(str(pack.get("html") or "") for pack in packs)
+        pack_html = (
+            f"<h3>Ready to paste — {len(packs)} of those {len(apply_all)}, "
+            f"best fit first</h3>{blocks}"
+        )
+
+    # Guessed-domain addresses, not emailed. Every field is remote text (the address came
+    # off a stranger's web page), so all of it is escaped — this is the least trustworthy
+    # input in the whole digest.
+    proposed = stats.get("proposed_contacts") or []
+    proposed_html = ""
+    if proposed:
+        rows_html = ""
+        for item in proposed[:_APPLY_SHOWN]:
+            email = escape(str(item.get("email") or ""))
+            company = escape(str(item.get("company") or ""))
+            post = escape(str(item.get("lead_url") or ""), quote=True)
+            page = escape(str(item.get("source_url") or ""), quote=True)
+            rows_html += (
+                f"<li><strong>[{int(item.get('fit_score', 0))}]</strong> "
+                f"<code>{email}</code>{f' — {company}' if company else ''}<br>"
+                f'<a href="{post}">the post</a> · '
+                f'<a href="{page}">where the address was found</a></li>'
+            )
+        more = (
+            f'<p style="color:#666">… and {len(proposed) - _APPLY_SHOWN} more</p>'
+            if len(proposed) > _APPLY_SHOWN
+            else ""
+        )
+        proposed_html = (
+            f"<h3>Possible addresses — {len(proposed)} on a guessed company domain</h3>"
+            '<p style="color:#666">Nothing was emailed to these. The domain was derived '
+            "from the company name, not from the post, so a human confirms before any of "
+            "them is used.</p>"
+            f"<ol>{rows_html}</ol>{more}"
+        )
     return f"""\
 <html><body style="font-family:system-ui,Arial,sans-serif">
 <h2>AI Freelance Copilot — pipeline digest</h2>
@@ -274,6 +385,7 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
 <h3>This run</h3>
 <ul>
   <li>Contactable: {stats.get('contactable', 0)}</li>
+{_discovered_li(stats)}
   <li>Fetched: {stats.get('fetched', 0)}</li>
   <li>New: {stats.get('new', 0)}</li>
   <li>Queued: {stats.get('queued', 0)}</li>
@@ -288,6 +400,8 @@ def _html(stats: dict, top_leads: list[dict], base_url: str) -> str:
 <h3>Top leads awaiting your review</h3>
 <ol>{rows}</ol>
 {apply_html}
+{pack_html}
+{proposed_html}
 <p style="color:#666">Nothing was submitted automatically — review and submit yourself.</p>
 </body></html>"""
 

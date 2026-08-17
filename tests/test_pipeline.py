@@ -1073,3 +1073,144 @@ def test_the_headline_bottleneck_and_the_apply_list_cannot_disagree():
     if blocked and blocked >= max(1, stats["fit"]["passed"] // 2):
         assert stats["fit"]["bottleneck"].startswith("contacts")
         assert f"of {stats['fit']['passed']} leads" in stats["fit"]["bottleneck"]
+
+
+# --- the qualified/contactable split is a property of the SOURCE MIX ------------
+# These pin the diagnosis that took a manual pull of six runs' logs to reach: the
+# leads that clear the bar and the leads that carry an address come from different
+# feeds, so the aggregate "N unreachable" hides which lever applies.
+
+#: The real per-source shape of the 6 runs of 2026-08-10..17, used as the fixture so a
+#: regression is measured against production rather than an invented case.
+_TEN_DAY_ROWS = {
+    "contract_jobs": {"passed": 79, "contactable": 0, "p50": 52},
+    "jobicy": {"passed": 76, "contactable": 14, "p50": 48},
+    "remote_boards": {"passed": 76, "contactable": 1, "p50": 52},
+    "working_nomads": {"passed": 17, "contactable": 0, "p50": 32},
+    "contra_startup": {"passed": 14, "contactable": 0, "p50": 42},
+    "hn_hiring": {"passed": 7, "contactable": 181, "p50": 28},
+}
+
+
+def test_the_bottleneck_names_the_sources_on_both_sides_of_the_split():
+    from pipeline import _contact_overlap_note
+
+    note = _contact_overlap_note(_TEN_DAY_ROWS, 70)
+    # The unreachable side: 79 + 76 + 17 + 14 = 186 qualified leads across four feeds
+    # that supplied ONE address between them. remote_boards belongs here on 76-and-1;
+    # a strict contactable==0 test dropped it on the strength of one lucky post.
+    assert "186 qualified lead(s)" in note
+    assert "1 address(es) between them" in note
+    assert "contract_jobs" in note
+    assert "remote_boards" in note
+    # The talking side, with the evidence that it is the wrong KIND of work.
+    assert "hn_hiring supplied 181 address(es)" in note
+    assert "median fit 28" in note
+    # And the lever, because naming a split without a lever is just a nicer zero.
+    assert "discovering the address" in note
+
+
+def test_a_run_where_the_same_sources_qualify_and_contact_reports_no_split():
+    """No note when the two halves overlap — the split IS the finding, so it must not
+    be printed on a run that does not have it, or it stops carrying information."""
+    from pipeline import _contact_overlap_note
+
+    rows = {
+        "reddit_forhire": {"passed": 20, "contactable": 18, "p50": 74},
+        "hn_hiring": {"passed": 9, "contactable": 11, "p50": 68},
+    }
+    assert _contact_overlap_note(rows, 70) == ""
+
+
+def test_one_unlucky_source_is_not_called_structurally_unreachable():
+    """A feed with 1-2 passing leads and no address is ordinary luck. Reporting it as a
+    structural split would fire the note on almost every run and train the reader to
+    skip the line that matters."""
+    from pipeline import _contact_overlap_note
+
+    rows = {
+        "contra_startup": {"passed": 2, "contactable": 0, "p50": 41},
+        "hn_hiring": {"passed": 1, "contactable": 28, "p50": 28},
+    }
+    assert _contact_overlap_note(rows, 70) == ""
+
+
+def test_the_split_note_needs_both_halves_to_exist():
+    """Unreachable feeds with no counterpart supplying addresses is a different finding
+    (nothing is contactable at all), already covered by the contacts bottleneck itself.
+    Claiming a split needs both populations."""
+    from pipeline import _contact_overlap_note
+
+    only_mute = {"contract_jobs": {"passed": 79, "contactable": 0, "p50": 52}}
+    assert _contact_overlap_note(only_mute, 70) == ""
+    only_talkers = {"hn_hiring": {"passed": 1, "contactable": 181, "p50": 28}}
+    assert _contact_overlap_note(only_talkers, 70) == ""
+
+
+def test_no_source_rows_degrades_to_the_plain_contacts_verdict():
+    """The rows are optional: _fit_summary is called from tests and tools without them,
+    and a missing input must not crash the only function that names a bottleneck."""
+    from pipeline import _contact_overlap_note, _fit_summary
+
+    assert _contact_overlap_note(None, 70) == ""
+    assert _contact_overlap_note({}, 70) == ""
+    fit = _fit_summary([95] * 10, 70, blocked_no_contact=10)
+    assert fit["bottleneck"].startswith("contacts")
+    assert "different sources" not in fit["bottleneck"]
+
+
+def test_the_split_note_is_appended_to_the_contacts_bottleneck():
+    from pipeline import _fit_summary
+
+    fit = _fit_summary(
+        [95] * 269, 70, blocked_no_contact=262, source_rows=_TEN_DAY_ROWS
+    )
+    assert fit["bottleneck"].startswith("contacts:")
+    assert "different sources" in fit["bottleneck"]
+    assert "hn_hiring" in fit["bottleneck"]
+
+
+def test_a_missing_p50_does_not_print_a_none_median():
+    """`p50` is absent from a source row until it scores something. Interpolating it
+    unguarded printed "median fit None", which reads as a bug in the scorer."""
+    from pipeline import _contact_overlap_note
+
+    rows = {
+        "contract_jobs": {"passed": 40, "contactable": 0},
+        "hn_hiring": {"passed": 1, "contactable": 30},
+    }
+    note = _contact_overlap_note(rows, 70)
+    assert "None" not in note
+    assert "median fit" not in note
+    assert "30 address(es)" in note
+
+
+def test_a_feed_with_one_lucky_address_is_still_counted_as_unreachable():
+    """76 qualified leads and 1 address is the same finding as 79 and none, but a
+    strict contactable==0 test excluded the clearest real example in the measured
+    window. A source that supplies an address for 5% of what it qualifies is a
+    channel problem, not a contactable source."""
+    from pipeline import _contact_overlap_note
+
+    rows = {
+        "remote_boards": {"passed": 76, "contactable": 1, "p50": 52},
+        "hn_hiring": {"passed": 1, "contactable": 40, "p50": 28},
+    }
+    note = _contact_overlap_note(rows, 70)
+    assert "remote_boards" in note
+    assert "76 qualified lead(s)" in note
+
+
+def test_a_source_pulling_its_weight_on_contacts_is_not_called_unreachable():
+    """jobicy qualified 76 and supplied 14 addresses — the one board that does both.
+    Listing it as unreachable would point the fix away from the source that works."""
+    from pipeline import _contact_overlap_note
+
+    rows = {
+        "jobicy": {"passed": 76, "contactable": 14, "p50": 48},
+        "contract_jobs": {"passed": 79, "contactable": 0, "p50": 52},
+        "hn_hiring": {"passed": 1, "contactable": 181, "p50": 28},
+    }
+    note = _contact_overlap_note(rows, 70)
+    assert "jobicy" not in note
+    assert "79 qualified lead(s)" in note

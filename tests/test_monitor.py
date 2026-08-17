@@ -68,6 +68,11 @@ def test_all_healthy_no_alert(temp_db, monkeypatch):
         # reply never stops the follow-up sequence, so the system keeps nudging people
         # who already answered.
         "reply_detection",
+        # Contact discovery is the lever on the biggest loss in the funnel (262 of 269
+        # qualified leads published no address), and it fails silently: it fetches other
+        # people's sites, so a blocked user-agent looks exactly like "nobody publishes
+        # an address". Watched on attempts vs hits, never on hits alone.
+        "discovery",
     }
 
 
