@@ -73,6 +73,10 @@ def test_all_healthy_no_alert(temp_db, monkeypatch):
         # people's sites, so a blocked user-agent looks exactly like "nobody publishes
         # an address". Watched on attempts vs hits, never on hits alone.
         "discovery",
+        # The lead loop now survives one lead's exception, which converts a loud total
+        # failure into a quiet partial one. This is what stops the quiet one — a run that
+        # skipped 60 of 175 leads and still exited 0 — from reading as healthy.
+        "lead_errors",
     }
 
 

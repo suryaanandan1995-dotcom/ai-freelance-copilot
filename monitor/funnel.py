@@ -420,6 +420,75 @@ def check_discovery_productive() -> dict:
     }
 
 
+def check_lead_errors() -> dict:
+    """Fail when the newest run silently dropped a meaningful share of its leads.
+
+    The lead loop now catches per-lead exceptions and continues, because run 32339343714
+    lost a 39-minute, $2.46 run — digest, apply packs and proposed addresses included — to
+    one lead's malformed model response. That fix trades a loud total failure for a quiet
+    partial one, and a quiet partial failure is the thing this module exists to catch: a
+    run that skipped 60 of 175 leads still exits 0 and still reports plausible-looking
+    counters.
+
+    Ratio, not count. One bad response in 175 is the weather; a third of the run is a
+    contract change or an outage, and only the ratio tells them apart.
+    """
+    try:
+        stats = _recent_stats(limit=1)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": "lead_errors",
+            "ok": False,
+            "detail": f"could not read run history: {exc}",
+        }
+    if not stats:
+        return {"name": "lead_errors", "ok": True, "detail": "no runs yet"}
+
+    latest = stats[0]
+    if "lead_errors" not in latest:
+        # Recorded before the counter existed: measured nothing, not measured zero.
+        return {
+            "name": "lead_errors",
+            "ok": True,
+            "detail": "metric not recorded for the latest run",
+        }
+    try:
+        errors = int(latest.get("lead_errors", 0) or 0)
+        processed = int(latest.get("new", 0) or 0)
+    except (TypeError, ValueError):
+        return {
+            "name": "lead_errors",
+            "ok": True,
+            "detail": "lead error counters unreadable for the latest run",
+        }
+
+    if errors == 0:
+        return {"name": "lead_errors", "ok": True, "detail": "no leads failed"}
+    if processed <= 0:
+        # Errors with no denominator: still worth saying out loud, without inventing a rate.
+        return {
+            "name": "lead_errors",
+            "ok": False,
+            "detail": f"{errors} lead(s) failed in the latest run (lead total unrecorded)",
+        }
+    share = errors / processed
+    if share >= 0.1:
+        return {
+            "name": "lead_errors",
+            "ok": False,
+            "detail": (
+                f"{errors} of {processed} leads ({share:.0%}) failed and were skipped in "
+                "the latest run. The run still exited 0 — check the warnings for the "
+                "exception type before trusting this run's counters."
+            ),
+        }
+    return {
+        "name": "lead_errors",
+        "ok": True,
+        "detail": f"{errors} of {processed} leads failed ({share:.0%}), below the 10% floor",
+    }
+
+
 def funnel_checks() -> list[dict]:
     """All funnel-health checks, shaped like ``monitor.doctor`` checks."""
     return [
@@ -428,4 +497,5 @@ def funnel_checks() -> list[dict]:
         check_outreach_stalled(),
         check_reply_detection_alive(),
         check_discovery_productive(),
+        check_lead_errors(),
     ]

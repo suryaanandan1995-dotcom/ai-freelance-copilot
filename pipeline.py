@@ -577,6 +577,11 @@ def run_pipeline(
     # address and the page it came from — is enough for a human to accept or bin in two
     # seconds, and it is the only way the guessed path ever earns the right to send.
     proposed_contacts: list[dict] = []
+    # Leads whose graph run raised and were skipped. Reported rather than merely logged:
+    # a swallowed exception that shows up in no number is how a run that lost a third of
+    # its leads reads as a clean success — the exact shape of every other defect in this
+    # file's history. ``check_lead_errors`` alerts on the ratio, not the count.
+    lead_errors = 0
     # Every fit score seen this run. Without this, "dropped: 34" is unactionable:
     # a run cannot tell you whether 34 leads scored 68 (threshold too strict) or 12
     # (sources off-ICP), which are opposite fixes. Recorded so min_fit_score can be
@@ -730,6 +735,26 @@ def run_pipeline(
                 budget_exhausted = True
                 logger.warning("budget exhausted at $%.4f — stopping run", tracker.usd())
                 break
+            except Exception as exc:  # noqa: BLE001 - one lead must not cost the run
+                # Run 32339343714 (2026-08-20) died here after 39 minutes and $2.46: one
+                # lead's structured-output parse raised a pydantic ValidationError, which
+                # propagated out of the loop, out of run_pipeline, and exited 1. The whole
+                # run's output went with it — no digest, no five apply packs, no proposed
+                # addresses, and the workflow's later follow-up steps never ran.
+                #
+                # The lead loop is 175 independent units of work. Letting the 40th abort
+                # the other 135 makes the run as fragile as its single worst model
+                # response. The root cause is fixed (core.schemas.FitVerdict), but "the
+                # model returned something unexpected" is not a bug class that closes, so
+                # the blast radius is capped here as well.
+                lead_errors += 1
+                logger.warning(
+                    "lead failed, skipping it: %s (%s: %s)",
+                    lead.url or lead.external_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
 
             scored = state.get("scored") or {}
             fit_score = int(scored.get("fit_score", 0))
@@ -936,6 +961,7 @@ def run_pipeline(
             proposed_contacts, key=lambda r: r.get("fit_score", 0), reverse=True
         ),
         "uncontactable_skipped": uncontactable_skipped,
+        "lead_errors": lead_errors,
         "queued": queued,
         "dropped": dropped,
         "skipped": skipped,
