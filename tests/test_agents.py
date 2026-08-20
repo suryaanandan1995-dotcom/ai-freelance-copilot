@@ -381,3 +381,84 @@ def test_a_verdict_without_the_lead_field_is_enough_to_score():
     scored = qualify(_lead(), chat=chat)
     assert scored.fit_score == 91
     assert scored.lead.title.startswith("Kubernetes")
+
+
+# --------------------------------------------------------------------------- #
+# The model stringifies list fields. Decode, don't discard.
+#
+# Narrowing the wire schema to FitVerdict stopped the 2026-08-20 crash from taking the
+# whole run down, and the very next run proved the habit itself had not gone away:
+#
+#   WARNING pipeline: lead failed, skipping it: https://www.adzuna.de/details/5845898630
+#   (ValidationError: 1 validation error for FitVerdict
+#    reasons  Input should be a valid list
+#    [type=list_type, input_value='["Core requirement is Sc...qualifier on its own."]'])
+#
+# The content was right and the encoding was one layer too deep. Refusing it discards a
+# Sonnet call that already succeeded, so the boundary decodes: lenient parser at the
+# edge, strict type inside.
+# --------------------------------------------------------------------------- #
+def test_a_json_encoded_list_of_reasons_is_decoded_not_rejected():
+    from core.schemas import FitVerdict
+
+    verdict = FitVerdict(
+        fit_score=82,
+        reasons='["Core requirement is Scala", "Remote-friendly"]',
+        matched_projects='["ai-freelance-copilot"]',
+    )
+    assert verdict.reasons == ["Core requirement is Scala", "Remote-friendly"]
+    assert verdict.matched_projects == ["ai-freelance-copilot"]
+
+
+def test_a_single_bare_sentence_becomes_one_reason():
+    """A real answer in the wrong container is still a real answer."""
+    from core.schemas import FitVerdict
+
+    assert FitVerdict(fit_score=50, reasons="Strong Kubernetes overlap").reasons == [
+        "Strong Kubernetes overlap"
+    ]
+
+
+def test_prose_that_merely_starts_with_a_bracket_is_kept_verbatim():
+    """Looked like JSON, was not: keep the text rather than lose the judgement."""
+    from core.schemas import FitVerdict
+
+    verdict = FitVerdict(fit_score=40, reasons="[unparseable, no closing bracket")
+    assert verdict.reasons == ["[unparseable, no closing bracket"]
+
+
+def test_null_and_empty_collapse_to_no_reasons_rather_than_a_literal():
+    from core.schemas import FitVerdict
+
+    assert FitVerdict(fit_score=10, reasons=None).reasons == []
+    assert FitVerdict(fit_score=10, reasons="").reasons == []
+    assert FitVerdict(fit_score=10, reasons="   ").reasons == []
+
+
+def test_a_proper_list_is_untouched():
+    """The coercion is a fallback, not a rewrite of the happy path."""
+    from core.schemas import FitVerdict
+
+    assert FitVerdict(fit_score=90, reasons=["a", "b"]).reasons == ["a", "b"]
+
+
+def test_non_string_items_inside_a_stringified_list_are_stringified():
+    """[1, 2] decodes to a list; list[str] must not then fail on the ints."""
+    from core.schemas import FitVerdict
+
+    assert FitVerdict(fit_score=70, reasons="[1, 2]").reasons == ["1", "2"]
+
+
+def test_fit_score_stays_required_and_bounded():
+    """Leniency is scoped to encoding. A missing or absurd score is still a defect —
+    it is the one field the caller cannot reconstruct, so guessing it would be worse
+    than failing the lead."""
+    import pydantic
+    import pytest as _pytest
+
+    from core.schemas import FitVerdict
+
+    with _pytest.raises(pydantic.ValidationError):
+        FitVerdict(reasons=["x"])  # type: ignore[call-arg]
+    with _pytest.raises(pydantic.ValidationError):
+        FitVerdict(fit_score=140)
