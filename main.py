@@ -231,11 +231,12 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     """
     import datetime as _dt
 
-    from db.models import LeadRecord, OutreachRecord
+    from db.models import LeadRecord, OutreachRecord, ProposalRecord
     from db.session import get_session, init_db
     from outreach.sender import mask_address
 
     days = max(1, int(getattr(args, "days", 30) or 30))
+    show_body = bool(getattr(args, "body", False))
     cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=days)
 
     init_db()
@@ -252,6 +253,19 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
             .filter(LeadRecord.id.in_([r.lead_id for r in rows if r.lead_id]))
             .all()
         } if rows else {}
+
+        # What we actually claimed. Walking into a booked call without it means
+        # risking contradicting your own pitch in the first two minutes — the pitch
+        # was written by an agent, so the human on the call has not read it.
+        pitches: dict[int, str] = {}
+        if show_body and rows:
+            for proposal in (
+                session.query(ProposalRecord)
+                .filter(ProposalRecord.lead_id.in_([r.lead_id for r in rows if r.lead_id]))
+                .order_by(ProposalRecord.created_at.asc())
+                .all()
+            ):
+                pitches[proposal.lead_id] = proposal.body
 
         print(f"Outreach ledger — last {days} day(s): {len(rows)} contact(s)\n")
         if not rows:
@@ -283,6 +297,15 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
                 # Sends predate the lead_id link, or the lead row was deleted. Say so
                 # rather than print a blank line that reads like "no such company".
                 print("      lead   : (not linked to a stored lead)")
+            if show_body:
+                pitch = pitches.get(r.lead_id or -1)
+                if pitch:
+                    print("      --- what we claimed ---")
+                    for line in pitch.splitlines():
+                        print(f"      {line}")
+                    print("      --- end ---")
+                else:
+                    print("      (no stored pitch for this contact)")
     return 0
 
 
@@ -355,6 +378,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_ledger.add_argument(
         "--days", type=int, default=30, help="Rolling window in days (default 30)."
+    )
+    p_ledger.add_argument(
+        "--body",
+        action="store_true",
+        help=(
+            "Also print the pitch that was sent. Needed before a booked call: the "
+            "email was written by an agent, so the human taking the call has not read "
+            "it and can otherwise contradict their own claims in the first two minutes."
+        ),
     )
     p_ledger.set_defaults(func=_cmd_ledger)
 
