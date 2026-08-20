@@ -16,7 +16,41 @@ the owner about the wrong person or briefing them twice.
 """
 from __future__ import annotations
 
+import html as _html
 import re
+
+_BLOCK_END_RE = re.compile(
+    r"(?i)</(?:p|div|td|tr|table|h[1-6]|li|ul|ol|blockquote)>|<br\s*/?>"
+)
+_DROP_BLOCK_RE = re.compile(r"(?is)<(script|style|head)\b.*?</\1>")
+_TAG_RE = re.compile(r"(?s)<[^>]+>")
+
+
+def visible_text(body: str) -> str:
+    """Plain text from an email body that may be HTML.
+
+    Not cosmetic. The real cal.com confirmation that started this feature has **no
+    text/plain part**, so every line-anchored heuristic below was matching against raw
+    markup: the address regex still found the invitee (addresses survive tags), but
+    ``When`` sat inside ``<p style=…>Friday, August 21, 2026</p>`` and so never matched a
+    line beginning with a weekday. The stored booking read "Senthil Govindarajan — ?" and
+    the briefing had to tell the owner to go and look up the time themselves — for a call
+    the next day. Lenient parser at the edge, strict types inside.
+    """
+    text = body or ""
+    if "<" not in text or ">" not in text:
+        return text
+    text = _DROP_BLOCK_RE.sub(" ", text)
+    # Block ends become newlines FIRST, so the layout the heuristics rely on (one field
+    # per line, the name directly above the address) survives tag removal.
+    text = _BLOCK_END_RE.sub("\n", text)
+    text = _TAG_RE.sub("", text)
+    text = _html.unescape(text)
+    # &nbsp; unescapes to U+00A0, which the regexes below do not count as whitespace.
+    text = text.replace("\xa0", " ").replace("\r", "")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line)
+
 
 #: Providers whose addresses carry no company information. A booking from one of these
 #: cannot be researched, which is itself the useful signal: it means "you have no idea
@@ -263,6 +297,10 @@ def parse_booking(
     Returns ``kind`` ("booked" / "cancelled" / "rescheduled"), ``booking_uid``,
     ``invitee_name``, ``invitee_email``, ``when_text``, ``join_url`` and ``subject``.
     """
+    # Every heuristic below is line-anchored, and the real confirmation is HTML-only, so
+    # this normalisation is what makes them apply at all.
+    body = visible_text(body)
+
     kind = classify(subject, body)
     if not kind:
         return None
@@ -270,17 +308,21 @@ def parse_booking(
     ours = {a.strip().lower() for a in owner_addresses if a and a.strip()}
     invitee_email = _invitee_email(body, ours)
     when_text = _when_text(body)
+    video = _VIDEO_RE.search(body)
+    join = _MEETING_URL_RE.search(body)
 
     # The structural guard, and the one that actually separates a booking from cal.com's
-    # marketing: a real event notification names WHO and WHEN. Product mail, changelogs
-    # and receipts name neither, and a briefing with neither is worthless anyway — the
-    # owner cannot prepare for "(unknown) at ?". Both are required, not either, because a
-    # release-notes email that happens to quote a support address would otherwise pass.
-    if not invitee_email or not when_text:
+    # marketing: a real event notification names a PERSON who is neither us nor cal.com
+    # infrastructure, and carries at least one other artifact of a real event (a time, or
+    # a link to join it). Changelogs and receipts have no attendee at all — their only
+    # address is a support mailbox, which `_invitee_email` already discards.
+    #
+    # Requiring the time *alone* alongside the person was the previous rule, and it was
+    # brittle for the same reason the keyword list was: it made a formatting change enough
+    # to lose a real booking silently. Two independent signals, either of which may fail.
+    if not invitee_email or not (when_text or video):
         return None
 
-    video = _VIDEO_RE.search(body or "")
-    join = _MEETING_URL_RE.search(body or "")
     if video:
         booking_uid = video.group(1)
     elif message_id:

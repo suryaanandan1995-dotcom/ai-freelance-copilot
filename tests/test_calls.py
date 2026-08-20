@@ -195,11 +195,14 @@ Unsubscribe from product updates
     )
 
 
-def test_a_booking_without_a_time_is_not_briefed():
-    # Half a booking is not a booking: the owner cannot prepare for "at ?", and a row with
-    # neither field is one the dedupe key would then protect forever.
-    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
-        "4:00pm - 4:15pm (Atlantic/Reykjavik)\n", ""
+def test_neither_a_time_nor_a_link_is_not_a_booking():
+    # A person alone is not enough: mail that merely mentions somebody, with no time and
+    # nothing to join, describes no event. The owner cannot prepare for "at ?", and the
+    # stored row would then be protected by the dedupe key forever.
+    body = (
+        REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "")
+        .replace("4:00pm - 4:15pm (Atlantic/Reykjavik)\n", "")
+        .replace("https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB", "")
     )
     assert _parse(body=body) is None
 
@@ -722,3 +725,162 @@ def test_purge_never_touches_a_real_booking(monkeypatch, temp_db, sent):
     assert second["purged"] == 0
     with dbsession.get_session() as s:
         assert s.query(CallRecord).count() == 2
+
+
+# The shape that actually arrives: cal.com's confirmation is HTML-only. Table cells and
+# styled paragraphs, non-breaking spaces, the role label glued to the name — all of it is
+# why the first stored booking read "Senthil Govindarajan — ?" and the briefing had to
+# tell the owner to go and look up the time of a call happening the next day.
+HTML_BOOKING_BODY = """\
+<html><head><style>.p{color:#000}</style></head><body>
+<table><tr><td><p style="font-size:24px">Cal.com&nbsp;&nbsp;Confirmed</p></td></tr>
+<tr><td><h1>A new event has been scheduled</h1></td></tr>
+<tr><td><p><strong>What</strong></p>
+<p>15 min meeting between Surya Anandan and Senthil Govindarajan</p></td></tr>
+<tr><td><p><strong>When</strong></p>
+<p style="color:#101010">Friday,&nbsp;August 21, 2026</p>
+<p style="color:#101010">4:00pm - 4:15pm (Atlantic/Reykjavik)</p></td></tr>
+<tr><td><p><strong>Who</strong></p>
+<p>Surya Anandan<span>Organizer</span></p><p><a href="mailto:suryaanandan1995@gmail.com">suryaanandan1995@gmail.com</a></p>
+<p>Senthil Govindarajan<span>Guest</span></p><p><a href="mailto:senthil.govindarajan@gmail.com">senthil.govindarajan@gmail.com</a></p>
+</td></tr>
+<tr><td><p><strong>Where</strong></p><p>Cal Video</p>
+<p><a href="https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB">https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB</a></p></td></tr>
+</table></body></html>
+"""
+
+
+def test_the_html_only_confirmation_parses_completely():
+    """The bug the very first stored booking exposed, pinned end to end.
+
+    Addresses survive markup, so the invitee was found and everything else was silently
+    lost: `when_text` was empty because "Friday, August 21, 2026" sat inside a styled
+    <p> and no line began with a weekday. A field that is blank for a reason unrelated to
+    the data is indistinguishable from a field the sender omitted.
+    """
+    booking = _parse(body=HTML_BOOKING_BODY)
+    assert booking is not None
+    assert booking["kind"] == "booked"
+    assert booking["invitee_email"] == "senthil.govindarajan@gmail.com"
+    assert booking["invitee_name"] == "Senthil Govindarajan"
+    assert "Friday, August 21, 2026" in booking["when_text"]
+    assert "4:00pm - 4:15pm" in booking["when_text"]
+    assert booking["booking_uid"] == "gwFiJkXTZGJToYpdXVFoPB"
+    assert booking["join_url"] == "https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB"
+
+
+def test_visible_text_drops_style_blocks_and_keeps_the_layout():
+    text = parse_mod.visible_text(HTML_BOOKING_BODY)
+    # A <style> body would otherwise be searched for names and times.
+    assert "color:#000" not in text
+    assert "font-size" not in text
+    # One field per line is what every heuristic depends on.
+    lines = text.splitlines()
+    assert "Friday, August 21, 2026" in lines
+    assert "senthil.govindarajan@gmail.com" in lines
+    # &nbsp; must not survive as U+00A0: the regexes do not treat it as whitespace.
+    assert "\xa0" not in text
+
+
+def test_visible_text_leaves_plain_text_untouched():
+    assert parse_mod.visible_text(REAL_BOOKING_BODY) == REAL_BOOKING_BODY
+
+
+def test_a_booking_with_a_link_but_no_parsed_time_is_still_a_booking():
+    # Two independent signals, either of which may fail. Requiring the time as well as the
+    # person made a formatting change enough to lose a real booking silently — the same
+    # brittleness as the keyword list, in the opposite direction.
+    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
+        "4:00pm - 4:15pm (Atlantic/Reykjavik)\n", ""
+    )
+    booking = _parse(body=body)
+    assert booking is not None
+    assert booking["when_text"] == ""
+
+
+def test_details_that_fill_in_later_are_backfilled_and_rebriefed(monkeypatch, temp_db, sent):
+    """The stored booking says "?" for the time; the fixed parser knows it. Tell the owner.
+
+    They were told to go and look the time up themselves, for a call that may be tomorrow.
+    Guarded on the field having been blank, so a re-read cannot turn this into a re-send
+    every two hours.
+    """
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="gwFiJkXTZGJToYpdXVFoPB",
+                invitee_name="Senthil Govindarajan",
+                invitee_email="senthil.govindarajan@gmail.com",
+                when_text="",  # what the HTML-blind parser stored
+                join_url="",
+                subject="15 min meeting between Surya Anandan and Senthil Govindarajan",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+
+    _fake_inbox(monkeypatch, [_real_message(body=HTML_BOOKING_BODY)])
+    stats = detect_mod.scan_for_bookings()
+    assert stats["already_known"] == 1
+    assert stats["booked"] == 0
+    assert stats["briefed"] == 1
+    assert "August 21, 2026" in sent[-1][0]
+
+    with dbsession.get_session() as s:
+        row = s.query(CallRecord).one()
+        assert "4:00pm - 4:15pm" in row.when_text
+        assert row.join_url.endswith("gwFiJkXTZGJToYpdXVFoPB")
+
+    # And the next pass is silent: nothing is blank any more.
+    third = detect_mod.scan_for_bookings()
+    assert third["briefed"] == 0
+    assert len(sent) == 1
+
+
+def test_backfill_never_overwrites_a_field_the_owner_has_already_read(monkeypatch, temp_db, sent):
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="gwFiJkXTZGJToYpdXVFoPB",
+                invitee_name="Senthil Govindarajan",
+                invitee_email="senthil.govindarajan@gmail.com",
+                when_text="Friday, August 21, 2026 4:00pm - 4:15pm (Atlantic/Reykjavik)",
+                join_url="https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+    # A reminder or a forwarded copy of the same event, formatted differently.
+    altered = HTML_BOOKING_BODY.replace("4:00pm - 4:15pm", "9:00pm - 9:15pm")
+    _fake_inbox(monkeypatch, [_real_message(body=altered)])
+
+    stats = detect_mod.scan_for_bookings()
+    assert stats["briefed"] == 0
+    assert sent == []
+    with dbsession.get_session() as s:
+        assert "4:00pm" in s.query(CallRecord).one().when_text
+
+
+def test_an_html_only_multipart_email_is_not_read_as_empty():
+    """`reply.inbox._plain_body` returns "" when there is no text/plain part.
+
+    cal.com writes its confirmation for humans, in HTML. Returning "" there makes a real
+    booking look like an empty email — detected as nothing, with no error anywhere.
+    """
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"] = REAL_BOOKING_SUBJECT
+    msg.set_content("fallback")  # replaced below so no text/plain part remains
+    msg.clear_content()
+    msg.set_content(HTML_BOOKING_BODY, subtype="html")
+
+    body = detect_mod._body_text(msg)
+    assert "Senthil Govindarajan" in body
+    booking = _parse(body=body)
+    assert booking is not None
+    assert "4:00pm - 4:15pm" in booking["when_text"]
