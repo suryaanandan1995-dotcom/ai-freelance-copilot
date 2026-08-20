@@ -49,7 +49,7 @@ def funnel(window_days: int = DEFAULT_WINDOW_DAYS) -> dict:
     Every field degrades to 0/None rather than raising: this feeds a notification
     path, and a KPI query must never be the reason a run reports failure.
     """
-    from db.models import LeadStatus, OutreachRecord, RunRecord
+    from db.models import CallRecord, LeadStatus, OutreachRecord, PostRecord, RunRecord
     from db.session import get_session
 
     since = _cutoff(window_days)
@@ -70,8 +70,42 @@ def funnel(window_days: int = DEFAULT_WINDOW_DAYS) -> dict:
             )
             emailed = len(sent)
             replied = sum(1 for r in sent if r.replied)
-            booked = sum(1 for r in sent if r.call_booked_at is not None)
+            replied_booked = sum(1 for r in sent if r.call_booked_at is not None)
             followups = sum(int(r.followups_sent or 0) for r in sent)
+
+            # Calls come from BOTH channels, and for a month this function could only see
+            # one of them. ``call_booked_at`` is stamped only when the invitee is someone we
+            # cold-emailed, so the first real booking this system ever produced — inbound,
+            # from a LinkedIn post — left `calls_booked: 0` in every report while a briefing
+            # about it sat in the owner's inbox. A metric that cannot rise for the channel
+            # that actually converts is not a metric; worse, ``verdict`` below reads it and
+            # was answering "rewrite the cold-email pitch" to a week that had booked a call.
+            call_rows = (
+                session.query(CallRecord)
+                .filter(CallRecord.created_at >= since, CallRecord.status == "booked")
+                .all()
+            )
+            inbound_calls = [c for c in call_rows if c.origin != "outreach"]
+            # Union, not sum: an outreach booking is normally evidenced twice — the stamp on
+            # the send AND the CallRecord the inbox sweep wrote — and counting both would
+            # double it. Deduped on the address, which is the same key both paths key on.
+            outreach_booked_addresses = {
+                (r.email or "").lower() for r in sent if r.call_booked_at is not None
+            } | {
+                (c.invitee_email or "").lower()
+                for c in call_rows
+                if c.origin == "outreach" and c.invitee_email
+            }
+            outreach_calls = len({a for a in outreach_booked_addresses if a})
+            booked = outreach_calls + len(inbound_calls)
+
+            # The denominator for inbound. Nothing reported posts against bookings, so the
+            # channel with the only result was also the one with no numbers attached.
+            posts_published = (
+                session.query(PostRecord)
+                .filter(PostRecord.created_at >= since, PostRecord.status == "published")
+                .count()
+            )
 
             runs = (
                 session.query(RunRecord)
@@ -109,10 +143,16 @@ def funnel(window_days: int = DEFAULT_WINDOW_DAYS) -> dict:
             "followups": followups,
             "replied": replied,
             "calls_booked": booked,
+            "calls_from_outreach": outreach_calls,
+            "calls_inbound": len(inbound_calls),
+            "posts_published": posts_published,
             "won": won,
             "cost_usd": round(cost, 4),
             "reply_rate_pct": _rate(replied, emailed),
-            "booking_rate_pct": _rate(booked, replied),
+            # Reply→booking is an OUTREACH rate: an inbound booking has no reply behind it,
+            # so mixing it in here would inflate the number that judges the reply handler
+            # with calls the reply handler never touched.
+            "booking_rate_pct": _rate(replied_booked, replied),
             "win_rate_pct": _rate(won, booked),
             "cost_per_reply_usd": round(cost / replied, 2) if replied else None,
             "cost_per_call_usd": round(cost / booked, 2) if booked else None,
@@ -143,6 +183,19 @@ def verdict(k: dict) -> str:
         return (
             f"NOT SENDING: {k.get('contactable', 0)} contactable lead(s) but 0 emails. "
             "Check auto_email, SMTP config, the daily cap, and outreach_min_fit."
+        )
+    # Checked BEFORE the reply ladder, because the reply ladder assumes cold email is the
+    # only channel and will happily answer "rewrite the pitch" to a week in which a call was
+    # booked through the other one. Ranking a channel with a booked call below a channel with
+    # zero replies is how a month gets spent tuning the losing half.
+    if k.get("calls_inbound") and not k.get("calls_from_outreach"):
+        posts = k.get("posts_published") or 0
+        return (
+            f"INBOUND IS THE CHANNEL THAT CONVERTS: {k['calls_inbound']} call(s) booked "
+            f"from {posts} post(s), against {k.get('replied', 0)} reply and "
+            f"{k.get('calls_from_outreach', 0)} calls from {k.get('emailed', 0)} cold "
+            "email(s). Post more and post better before rewriting the cold-email pitch — "
+            "the evidence says publishing works and emailing strangers does not."
         )
     if not k.get("replied"):
         return (
@@ -185,7 +238,16 @@ def format_kpis(k: dict) -> str:
         stage("contactable", k.get("contactable", 0)),
         stage("emailed", k.get("emailed", 0)),
         stage("replied", k.get("replied", 0), "reply_rate_pct"),
-        stage("calls booked", k.get("calls_booked", 0), "booking_rate_pct"),
+        stage("calls booked", k.get("calls_booked", 0)),
+        # Split, because the total hides the only finding that matters: which channel
+        # produced it. The rate belongs to the outreach half — inbound has no reply behind
+        # it, so its denominator is posts published, not replies received.
+        f"    {'from outreach':<14}{k.get('calls_from_outreach', 0)}"
+        f"   ({k.get('booking_rate_pct')}% of replies)"
+        if k.get("booking_rate_pct") is not None
+        else f"    {'from outreach':<14}{k.get('calls_from_outreach', 0)}",
+        f"    {'inbound':<14}{k.get('calls_inbound', 0)}"
+        f"   (from {k.get('posts_published', 0)} post(s) published)",
         stage("won", k.get("won", 0), "win_rate_pct"),
         f"  {'spend':<16}${k.get('cost_usd', 0.0)}",
     ]
