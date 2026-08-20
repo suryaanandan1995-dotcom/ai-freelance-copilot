@@ -23,6 +23,7 @@ surface that already works. These tests pin the properties that make it trustwor
 from __future__ import annotations
 
 import datetime as _dt
+import logging
 
 import pytest
 from sqlalchemy import create_engine
@@ -884,3 +885,98 @@ def test_an_html_only_multipart_email_is_not_read_as_empty():
     booking = _parse(body=body)
     assert booking is not None
     assert "4:00pm - 4:15pm" in booking["when_text"]
+
+
+def test_a_stub_text_plain_alternative_does_not_win_over_the_html(caplog):
+    """The bug that survived the HTML fix: preferring text/plain whenever it is non-empty.
+
+    The real confirmation ships *both* alternatives, and the plain one is a stub — enough
+    text to be truthy, not enough to hold the date. So the plain part won, the time never
+    parsed, and the counters still said `briefed=1`. The choice has to be made on content:
+    a mechanism that reports success while quietly not doing its job is the failure this
+    codebase keeps paying for.
+    """
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"] = REAL_BOOKING_SUBJECT
+    msg.set_content("Cal.com\n\nThis email was sent to you by Cal.com.\n")
+    msg.add_alternative(HTML_BOOKING_BODY, subtype="html")
+
+    body = detect_mod._body_text(msg)
+    booking = _parse(body=body)
+    assert booking is not None
+    assert "August 21, 2026" in booking["when_text"]
+    assert "4:00pm - 4:15pm" in booking["when_text"]
+
+
+def test_a_complete_text_plain_alternative_is_still_preferred():
+    """The fix must not mean "always read the HTML" — plain text is cheaper and safer."""
+    from email.message import EmailMessage
+
+    msg = EmailMessage()
+    msg["Subject"] = REAL_BOOKING_SUBJECT
+    msg.set_content(REAL_BOOKING_BODY)
+    msg.add_alternative("<p>ignored html</p>", subtype="html")
+
+    assert "ignored html" not in detect_mod._body_text(msg)
+    assert _parse(body=detect_mod._body_text(msg))["when_text"].startswith("Friday")
+
+
+def test_when_text_is_public_and_answers_the_alternative_question():
+    assert parse_mod.when_text(HTML_BOOKING_BODY)
+    assert parse_mod.when_text("Cal.com\nThis email was sent to you by Cal.com.") == ""
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "August 21, 2026 | 4:00pm - 4:15pm (Atlantic/Reykjavik)",  # both halves, one line
+        "When: Aug 21, 2026 at 16:00 (Atlantic/Reykjavik)",  # heading shares the line
+        "21 August 2026 16:00 (Atlantic/Reykjavik)",  # no weekday, single 24h time
+        "Fri, 21st Aug 2026, 4:00pm",  # abbreviated weekday, ordinal day
+    ],
+)
+def test_a_template_change_to_the_date_format_does_not_lose_the_time(line):
+    """The strict shape is cal.com's presentation choice, not the data.
+
+    Every one of these is a real booking whose time the anchored regex would have dropped,
+    leaving the owner a briefing that says "(time not parsed)" for a call the next day.
+    """
+    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
+        "4:00pm - 4:15pm (Atlantic/Reykjavik)", line
+    )
+    booking = _parse(body=body)
+    assert booking is not None
+    assert "2026" in booking["when_text"]
+    assert booking["when_text"].count("2026") == 1  # not the date line joined to itself
+
+
+def test_the_looser_date_pass_does_not_match_a_footer():
+    # "© 2026 Cal.com" and a support phone number must not become the time of the meeting.
+    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
+        "4:00pm - 4:15pm (Atlantic/Reykjavik)\n", ""
+    )
+    body += "\n© 2026 Cal.com, Inc.\nSan Francisco, CA 94107\n"
+    assert _parse(body=body)["when_text"] == ""
+
+
+def test_the_unparsed_time_diagnostic_never_logs_a_person(monkeypatch, temp_db, sent, caplog):
+    """A public Actions log cannot carry the mail, so it carries only lines with no PII.
+
+    Without *some* view of the real mail an unparseable date is unfixable — but the repo is
+    public, so the diagnostic is restricted by construction to lines holding a digit and
+    neither "@" nor a URL.
+    """
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
+        "4:00pm - 4:15pm (Atlantic/Reykjavik)\n", "Sometime on the 3rd\n"
+    )
+    _fake_inbox(monkeypatch, [_real_message(body=body)])
+    with caplog.at_level(logging.INFO, logger="calls.detect"):
+        stats = detect_mod.scan_for_bookings()
+    assert stats["booked"] == 1
+    logged = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "Sometime on the 3rd" in logged
+    assert "senthil.govindarajan@gmail.com" not in logged
+    assert "app.cal.com/video" not in logged

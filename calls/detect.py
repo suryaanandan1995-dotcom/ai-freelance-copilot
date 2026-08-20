@@ -63,19 +63,8 @@ def _decode(value: str | None) -> str:
         return value
 
 
-def _body_text(msg) -> str:
-    """The message body, preferring text/plain but accepting text/html.
-
-    ``reply.inbox._plain_body`` returns "" for a multipart message with no text/plain
-    part, and cal.com's confirmation is written for humans in HTML. Returning "" there
-    would make an HTML-only booking look like an empty email — detected as nothing, with
-    no error anywhere. ``calls.parse.visible_text`` strips the markup afterwards.
-    """
-    from reply.inbox import _plain_body
-
-    plain = _plain_body(msg)
-    if plain.strip():
-        return plain
+def _html_body(msg) -> str:
+    """The text/html part of a message, decoded, or "" when there is none."""
     try:
         if msg.is_multipart():
             for part in msg.walk():
@@ -87,9 +76,69 @@ def _body_text(msg) -> str:
                 if payload is not None:
                     charset = part.get_content_charset() or "utf-8"
                     return payload.decode(charset, errors="replace")
-    except Exception as exc:  # noqa: BLE001
+        elif msg.get_content_type() == "text/html":
+            payload = msg.get_payload(decode=True)
+            if payload is not None:
+                return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001 - a malformed part must not stop the sweep
         logger.warning("calls: could not read an HTML body: %s", exc)
+    return ""
+
+
+def _body_text(msg) -> str:
+    """The message body — whichever alternative actually carries the booking details.
+
+    ``reply.inbox._plain_body`` returns "" for a multipart message with no text/plain part,
+    and cal.com's confirmation is written for humans in HTML. Returning "" there would make
+    an HTML-only booking look like an empty email — detected as nothing, with no error
+    anywhere.
+
+    Preferring text/plain *whenever it is non-empty* was the next version of that same bug:
+    the real confirmation ships a text/plain alternative that is a stub, so the plain part
+    won, the date never parsed, and the briefing said "(time not parsed)" while every
+    counter reported success. So the choice is made on content, not on part order: if the
+    plain part carries no date or time and an HTML part exists, read the HTML.
+    ``calls.parse.visible_text`` strips the markup afterwards.
+    """
+    from calls import parse as parse_mod
+    from reply.inbox import _plain_body
+
+    plain = _plain_body(msg)
+    html = _html_body(msg)
+    if not plain.strip():
+        return html or plain
+    if html and not parse_mod.when_text(plain):
+        return html
     return plain
+
+
+def _log_when_shapes(body: str, limit: int = 6) -> None:
+    """Log the shape of the lines that *might* have been the date, when none parsed.
+
+    A booking whose time will not parse is unfixable without knowing what the mail actually
+    looks like, and this repository is public, so the log cannot carry the mail. What it can
+    carry is the subset that contains no personal data by construction: a line with a digit,
+    no "@", no URL, at most six words and at most sixty characters. A date, a time and a
+    timezone all fit inside that; "15 min meeting between Surya Anandan and Senthil
+    Govindarajan" does not, which is exactly why the word cap is here and not a nicety.
+    """
+    from calls.parse import visible_text
+
+    shown = 0
+    for raw in visible_text(body or "").splitlines():
+        line = raw.strip()
+        if not line or "@" in line or "http" in line.lower():
+            continue
+        if not any(char.isdigit() for char in line):
+            continue
+        if len(line) > 60 or len(line.split()) > 6:
+            continue
+        logger.info("calls: unparsed-time candidate line: %r", line[:70])
+        shown += 1
+        if shown >= limit:
+            break
+    if not shown:
+        logger.info("calls: no candidate date lines at all in a mail with no parsed time")
 
 
 def _latest_published_post():
@@ -298,6 +347,8 @@ def scan_for_bookings() -> dict:
             )
             if booking is None:
                 continue
+            if not booking["when_text"]:
+                _log_when_shapes(message["body"])
 
             with get_session() as session:
                 existing = (
@@ -395,9 +446,13 @@ def scan_for_bookings() -> dict:
             stats["booked"] += 1
             if sent:
                 stats["briefed"] += 1
+                from outreach.sender import mask_address
+
+                # Masked: this repository is public, so every Actions log is too, and the
+                # person who booked did not agree to have their address published.
                 logger.info(
                     "calls: briefed the owner on a booking from %s (%s)",
-                    booking["invitee_email"] or "unknown address",
+                    mask_address(booking["invitee_email"]) if booking["invitee_email"] else "?",
                     origin,
                 )
             else:

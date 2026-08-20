@@ -90,6 +90,16 @@ _MEETING_URL_RE = re.compile(
 _WHEN_DATE_RE = re.compile(
     r"^(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day\b.*\d{4}", re.IGNORECASE
 )
+_MONTH = r"(?:Jan|Febr|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)[a-z]*\.?"
+#: The fallback date shape: a month name next to a day and a four-digit year, in either
+#: order and anywhere on the line. Deliberately looser than ``_WHEN_DATE_RE`` because the
+#: weekday prefix is a cal.com presentation choice, not part of the data — losing the time
+#: because the template dropped "Friday," is exactly the silent failure this pipeline keeps
+#: paying for. A month name plus a year is specific enough that footers do not match it.
+_DATE_ANYWHERE_RE = re.compile(
+    rf"\b(?:{_MONTH}\s+\d{{1,2}}\b|\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH})\b.{{0,20}}?\b\d{{4}}\b",
+    re.IGNORECASE,
+)
 _ROLE_SUFFIX_RE = re.compile(r"\s*(?:Organizer|Guest|Attendee|Host)\s*$", re.IGNORECASE)
 #: cal.com's own section headings and status words. Each of these can appear on the line
 #: directly above an address, where a name is otherwise expected.
@@ -121,6 +131,12 @@ _SUBJECT_TAIL_RE = re.compile(
     r"\s+on\s+(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day\b", re.IGNORECASE
 )
 _WHEN_TIME_RE = re.compile(r"\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[-–—]\s*\d{1,2}[:.]\d{2}", re.IGNORECASE)
+#: The fallback time shape: a single clock time. cal.com renders a range, but a template
+#: that shows only the start time is still a time, and a briefing that names the start is
+#: worth far more than one that says "(time not parsed)".
+_TIME_ANYWHERE_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", re.IGNORECASE)
+#: Strips the "When" heading when the heading and the value share a line ("When: ...").
+_WHEN_LABEL_RE = re.compile(r"^(?:when|date(?:\s*&\s*time)?|time)\s*[:\-–]\s*", re.IGNORECASE)
 
 #: Phrases that mean "a booking now exists" and "a booking no longer exists". Matched
 #: case-insensitively against subject + body. A cancellation that briefed as a booking
@@ -268,20 +284,50 @@ def _invitee_name(subject: str, body: str, invitee_email: str, owner_name: str) 
 
 
 def _when_text(body: str) -> str:
-    """A human-readable date+time, joined from whichever lines look like one."""
-    date_line = ""
-    time_line = ""
-    for raw in (body or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if not date_line and _WHEN_DATE_RE.match(line):
-            date_line = line
-        elif not time_line and _WHEN_TIME_RE.search(line):
-            time_line = line
+    """A human-readable date+time, joined from whichever lines look like one.
+
+    Two passes. The first is the strict, line-anchored shape cal.com actually sends
+    ("Friday, August 21, 2026" / "4:00pm - 4:15pm (UTC)"). The second accepts a month-and-
+    year anywhere on a line and a single clock time, because the strict pass reading a real
+    booking as "(time not parsed)" is the failure mode this function exists to prevent, and
+    a template tweak upstream must not be able to cause it.
+    """
+    partial = ""
+    for date_re, time_re, anchored in (
+        (_WHEN_DATE_RE, _WHEN_TIME_RE, True),
+        (_DATE_ANYWHERE_RE, _TIME_ANYWHERE_RE, False),
+    ):
+        date_line = ""
+        time_line = ""
+        for raw in (body or "").splitlines():
+            line = _WHEN_LABEL_RE.sub("", raw.strip())
+            if not line:
+                continue
+            hit_date = date_re.match(line) if anchored else date_re.search(line)
+            if not date_line and hit_date:
+                date_line = line
+                # One line can carry both halves ("Aug 21, 2026 | 4:00pm"); do not then go
+                # looking for a second, later line and append it.
+                if time_re.search(line):
+                    return line
+            elif not time_line and time_re.search(line):
+                time_line = line
+            if date_line and time_line:
+                break
         if date_line and time_line:
-            break
-    return " ".join(part for part in (date_line, time_line) if part).strip()
+            return f"{date_line} {time_line}"
+        # A half-answer is kept, but the looser pass still gets its turn at completing it.
+        partial = partial or date_line or time_line
+    return partial
+
+
+def when_text(body: str) -> str:
+    """The date+time found in ``body``, markup or not. "" when there is none.
+
+    Public because choosing between a mail's text/plain and text/html alternatives is a
+    question about which one carries the booking details, and this is the answer to it.
+    """
+    return _when_text(visible_text(body))
 
 
 def parse_booking(
