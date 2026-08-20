@@ -17,6 +17,31 @@ from __future__ import annotations
 from calls import parse
 
 
+def _their_words(booking: dict) -> list[str]:
+    """The invitee's own note, quoted first, when cal.com carried one.
+
+    This outranks every inference below it — a guess about the referrer, the freemail
+    reasoning, all of it. They wrote down why they booked; nothing this module derives can
+    beat that, so it goes at the top and is labelled as theirs, not ours.
+    """
+    notes = (booking.get("notes") or "").strip()
+    if not notes:
+        return []
+    lines = [
+        "WHY THEY BOOKED — in their own words, from the booking form",
+        "",
+    ]
+    lines += [f"    {line}" for line in notes.splitlines() if line.strip()]
+    lines += [
+        "",
+        "  That is what they typed, verbatim. Read it twice: it is the agenda, and the",
+        "  fastest way to lose the call is to open with your pitch instead of their",
+        "  sentence. Everything below is inference — this is not.",
+        "",
+    ]
+    return lines
+
+
 def _outreach_purpose(lead, pitch: str) -> list[str]:
     """We cold-emailed this person: the purpose is the job in their own post."""
     lines = [
@@ -50,16 +75,48 @@ def _outreach_purpose(lead, pitch: str) -> list[str]:
     return lines
 
 
-def _inbound_purpose(booking: dict, latest_post) -> list[str]:
-    """No cold email went to this address, so the purpose is genuinely unknown."""
+def _inbound_purpose(booking: dict, latest_post, *, stated: bool = False) -> list[str]:
+    """No cold email went to this address, so the purpose is genuinely unknown.
+
+    ``stated`` is True when the invitee wrote a note, which :func:`_their_words` has already
+    quoted above. Everything here is then demoted from "this is what to ask" to background,
+    because telling the owner to go and ask a question the person has already answered
+    would read as a briefing that had not been read.
+    """
     address = booking.get("invitee_email", "")
     lines = [
-        "WHY THEY BOOKED — unknown. Do not guess on the call, ask.",
+        (
+            "WHERE THEY CAME FROM — inference, unlike the note above"
+            if stated
+            else "WHY THEY BOOKED — unknown. Do not guess on the call, ask."
+        ),
         "  This address was never cold-emailed, so the booking is INBOUND: they found",
         "  the cal.com link themselves. It is published in your LinkedIn posts, on the",
         "  GitHub portfolio site, and in cold emails — so LinkedIn or GitHub.",
         "",
     ]
+    if stated:
+        # The four-possibilities triage and the qualifying question both exist to recover
+        # from not knowing. They are noise once the person has said what they want.
+        if not parse.is_freemail(address):
+            domain = address.rpartition("@")[2]
+            lines += [
+                f"  It is a company address ({domain}) — two minutes on {domain} before you",
+                "  join, so their note lands in the context of what they actually sell.",
+                "",
+            ]
+        if latest_post is not None and latest_post.body:
+            when = (
+                latest_post.published_at.strftime("%Y-%m-%d")
+                if latest_post.published_at
+                else "recently"
+            )
+            lines += [
+                f"  Your most recent LinkedIn post ({when}) is the likeliest way they found",
+                "  you, if their note does not already say.",
+                "",
+            ]
+        return lines
     if parse.is_freemail(address):
         lines += [
             "  It is a personal mailbox, not a company domain, so there is no company to",
@@ -109,7 +166,14 @@ def _plan(booking: dict, origin: str) -> list[str]:
     """Fifteen minutes, allocated. Same shape either way; the opening differs."""
     name = booking.get("invitee_name") or "them"
     first_name = name.split()[0] if name else "there"
-    if origin == "outreach":
+    if (booking.get("notes") or "").strip():
+        # They already answered "why are we talking". Asking it again wastes the minute that
+        # matters most and signals the booking form was never read.
+        opening = (
+            f'    "{first_name}, thanks for booking — I read your note. Tell me more about'
+            f'\n     that: what does it look like today, and what breaks?"'
+        )
+    elif origin == "outreach":
         opening = (
             f'    "{first_name}, thanks for booking. Before I pitch anything — what\'s'
             f' the\n     problem that made you post in the first place?"'
@@ -177,10 +241,11 @@ def build_brief(
     ]
     if booking.get("join_url"):
         lines.append(f"JOIN  {booking['join_url']}")
-    lines += ["", *(
+    stated = _their_words(booking)
+    lines += ["", *stated, *(
         _outreach_purpose(lead, pitch)
         if origin == "outreach"
-        else _inbound_purpose(booking, latest_post)
+        else _inbound_purpose(booking, latest_post, stated=bool(stated))
     ), *_plan(booking, origin)]
     lines += [
         "",

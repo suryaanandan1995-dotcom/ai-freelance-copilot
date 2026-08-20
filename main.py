@@ -368,6 +368,13 @@ def _list_calls() -> int:
             print(f"  [{flag}] {row.invitee_name or '(unknown)'} — {row.when_text or '?'}")
             print(f"      who    : {mask_address(row.invitee_email)} ({row.origin}){company}")
             print(f"      subject: {row.subject or '(none)'}")
+            # Whether a note exists, never the note. It is a stranger's own account of their
+            # business, and this command runs in a PUBLIC Actions log; the briefing email is
+            # the private channel that carries the words themselves.
+            note = (row.notes or "").strip()
+            print(
+                f"      note   : {f'yes, {len(note)} chars — in the briefing email' if note else 'none given'}"
+            )
             print(f"      uid    : {row.booking_uid}")
     return 0
 
