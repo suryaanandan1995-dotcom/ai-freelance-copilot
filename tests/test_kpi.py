@@ -16,6 +16,7 @@ from sqlalchemy.orm import sessionmaker
 
 import db.session as dbsession
 from db.models import Base, LeadRecord, LeadStatus, OutreachRecord, RunRecord
+from monitor import kpi
 from monitor.kpi import format_kpis, funnel, verdict
 
 
@@ -268,3 +269,154 @@ def test_verdict_is_pure_and_ordered_top_down():
     assert "NOT SENDING" in verdict(
         {"contactable": 5, "emailed": 0, "replied": 0, "calls_booked": 0, "won": 0}
     )
+
+
+# ---------------------------------------------------------------------------
+# Both channels, not one. `call_booked_at` is stamped only for people we cold-emailed, so
+# for a month `calls_booked` could not rise for the channel that actually converted: the
+# first real booking this system produced was inbound, from a LinkedIn post, and every
+# report said `calls_booked: 0` while a briefing about it sat in the owner's inbox.
+# ---------------------------------------------------------------------------
+def _booking(**kw):
+    from db.models import CallRecord
+
+    defaults = {
+        "booking_uid": "uid-1",
+        "invitee_name": "Someone Inbound",
+        "invitee_email": "someone@gmail.com",
+        "origin": "inbound",
+        "status": "booked",
+        "notified": True,
+    }
+    return CallRecord(**{**defaults, **kw})
+
+
+def test_an_inbound_booking_is_counted(temp_db):
+    from db.session import get_session
+
+    with get_session() as s:
+        s.add(_booking())
+
+    k = kpi.funnel(30)
+    assert k["calls_booked"] == 1
+    assert k["calls_inbound"] == 1
+    assert k["calls_from_outreach"] == 0
+
+
+def test_an_outreach_booking_evidenced_twice_is_counted_once(temp_db):
+    """The stamp on the send AND the CallRecord the sweep wrote are the same call."""
+    import datetime as _dt
+
+    from db.models import OutreachRecord
+    from db.session import get_session
+
+    now = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+    with get_session() as s:
+        s.add(
+            OutreachRecord(
+                lead_id=None,
+                email="hiring@acme.com",
+                status="sent",
+                sent_at=now,
+                replied=True,
+                call_booked_at=now,
+            )
+        )
+        s.add(_booking(invitee_email="hiring@acme.com", origin="outreach", booking_uid="uid-2"))
+
+    k = kpi.funnel(30)
+    assert k["calls_from_outreach"] == 1
+    assert k["calls_booked"] == 1
+
+
+def test_reply_to_booking_rate_stays_an_outreach_rate(temp_db):
+    """An inbound booking has no reply behind it, so it must not inflate this rate.
+
+    Crediting the reply handler with calls it never touched would make the number that
+    judges it unfalsifiable in exactly the direction nobody wants.
+    """
+    import datetime as _dt
+
+    from db.models import OutreachRecord
+    from db.session import get_session
+
+    now = _dt.datetime.now(_dt.UTC).replace(tzinfo=None)
+    with get_session() as s:
+        for index in range(4):
+            s.add(
+                OutreachRecord(
+                    lead_id=None,
+                    email=f"lead{index}@acme.com",
+                    status="sent",
+                    sent_at=now,
+                    replied=True,
+                )
+            )
+        s.add(_booking(booking_uid="uid-3"))
+        s.add(_booking(booking_uid="uid-4", invitee_email="other@gmail.com"))
+
+    k = kpi.funnel(30)
+    assert k["replied"] == 4
+    assert k["calls_inbound"] == 2
+    assert k["calls_booked"] == 2
+    assert k["booking_rate_pct"] == 0.0  # not 50% — no reply produced either booking
+
+
+def test_a_cancelled_call_is_not_a_booked_call(temp_db):
+    from db.session import get_session
+
+    with get_session() as s:
+        s.add(_booking(status="cancelled"))
+
+    assert kpi.funnel(30)["calls_booked"] == 0
+
+
+def test_the_verdict_names_the_channel_that_converted(temp_db):
+    """The ladder used to answer "rewrite the cold-email pitch" to a week with a booked call.
+
+    Ranking a channel that produced a call below a channel that produced zero replies is
+    how a month gets spent tuning the losing half of the system.
+    """
+    line = kpi.verdict(
+        {
+            "contactable": 30,
+            "emailed": 23,
+            "replied": 1,
+            "calls_booked": 1,
+            "calls_inbound": 1,
+            "calls_from_outreach": 0,
+            "posts_published": 3,
+            "won": 0,
+        }
+    )
+    assert "INBOUND IS THE CHANNEL THAT CONVERTS" in line
+    assert "3 post(s)" in line
+    assert "23 cold email" in line
+
+
+def test_the_outreach_verdict_is_unchanged_when_outreach_is_what_converted():
+    line = kpi.verdict(
+        {
+            "contactable": 30,
+            "emailed": 23,
+            "replied": 5,
+            "calls_booked": 2,
+            "calls_inbound": 0,
+            "calls_from_outreach": 2,
+            "posts_published": 3,
+            "won": 0,
+        }
+    )
+    assert "call(s) booked, none won yet" in line
+
+
+def test_the_digest_splits_the_channels(temp_db):
+    from db.session import get_session
+
+    with get_session() as s:
+        s.add(_booking())
+
+    text = kpi.format_kpis(kpi.funnel(30))
+    assert "from outreach" in text
+    assert "inbound" in text
+    assert "post(s) published" in text
