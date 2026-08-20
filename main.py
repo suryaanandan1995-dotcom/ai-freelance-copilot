@@ -324,7 +324,8 @@ def _cmd_calls(args: argparse.Namespace) -> int:
     stats = scan_for_bookings()
     print(
         "calls: scanned={scanned} booked={booked} cancelled={cancelled} "
-        "briefed={briefed} already_known={already_known} errors={errors}".format(**stats)
+        "briefed={briefed} already_known={already_known} purged={purged} "
+        "errors={errors}".format(**stats)
     )
     # Deliberately no addresses in the output: Actions logs on a public repo are public.
     if stats["booked"] and not stats["briefed"]:

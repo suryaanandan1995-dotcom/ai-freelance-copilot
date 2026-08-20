@@ -91,16 +91,22 @@ _WHEN_TIME_RE = re.compile(r"\d{1,2}[:.]\d{2}\s*(?:am|pm)?\s*[-–—]\s*\d{1,2}
 #: Phrases that mean "a booking now exists" and "a booking no longer exists". Matched
 #: case-insensitively against subject + body. A cancellation that briefed as a booking
 #: would send the owner to a dead call, so the two are never conflated.
-#: Kept broad on purpose. cal.com words the same event differently depending on who the
-#: recipient is ("A new event has been scheduled" to the organizer, "This meeting is
-#: scheduled" / "Confirmed:" to the attendee) and has reworded it between releases. Only
-#: mail that already passed the ``From: *cal.com`` check reaches here, so a loose match
-#: costs nothing, while a narrow one silently drops the booking it was written for.
+#: Wording varies by recipient ("A new event has been scheduled" to the organizer, "This
+#: meeting is scheduled" to the attendee) and has changed between cal.com releases, so
+#: several spellings are accepted — but no single word is, and "confirmed" in particular
+#: is not: cal.com's own product mail is full of it. The first production sweep matched a
+#: release-notes email ("Changelog: Cal.com v6.8 — Cal Events, new troubleshooter…") and
+#: emailed the owner a briefing for a call that did not exist. A check that fires for a
+#: reason unrelated to the one it exists for is worse than no check.
+#:
+#: The real guard is structural and lives in ``parse_booking``: a booking names a person
+#: and a time. Marketing mail names neither.
 _BOOKED_MARKERS = (
     "has been scheduled",
     "is scheduled",
-    "new event",
-    "confirmed",
+    "new event has been",
+    "new booking",
+    "meeting between",
 )
 _CANCELLED_MARKERS = (
     "has been cancelled",
@@ -159,6 +165,12 @@ def _looks_like_a_name(text: str) -> bool:
     if stripped.endswith((":", "?", "!", ".")) or "://" in stripped:
         return False
     if len(stripped.split()) > 5:  # a sentence, not a person
+        return False
+    # The date and time sit directly above the address in some layouts, and "CALL BOOKED —
+    # 10:00am - 10:15am (UTC)" names nobody.
+    if _WHEN_DATE_RE.match(stripped) or _WHEN_TIME_RE.search(stripped):
+        return False
+    if any(char.isdigit() for char in stripped):
         return False
     return stripped.strip(" -–—").lower() not in _LABEL_WORDS
 
@@ -257,6 +269,15 @@ def parse_booking(
 
     ours = {a.strip().lower() for a in owner_addresses if a and a.strip()}
     invitee_email = _invitee_email(body, ours)
+    when_text = _when_text(body)
+
+    # The structural guard, and the one that actually separates a booking from cal.com's
+    # marketing: a real event notification names WHO and WHEN. Product mail, changelogs
+    # and receipts name neither, and a briefing with neither is worthless anyway — the
+    # owner cannot prepare for "(unknown) at ?". Both are required, not either, because a
+    # release-notes email that happens to quote a support address would otherwise pass.
+    if not invitee_email or not when_text:
+        return None
 
     video = _VIDEO_RE.search(body or "")
     join = _MEETING_URL_RE.search(body or "")
@@ -266,19 +287,18 @@ def parse_booking(
         # No video link (an in-person or phone booking): the Message-ID still makes
         # "alert exactly once" work, which is the only job this field has.
         booking_uid = message_id.strip()
-    elif invitee_email:
-        # Last resort — pair the invitee with the time so two different bookings by the
-        # same person are still distinct rows.
-        booking_uid = f"{invitee_email}|{_when_text(body)}"
     else:
-        return None
+        # Last resort — pair the invitee with the time so two different bookings by the
+        # same person are still distinct rows. Both parts are guaranteed non-empty by the
+        # guard above.
+        booking_uid = f"{invitee_email}|{when_text}"
 
     return {
         "kind": kind,
         "booking_uid": booking_uid[:256],
         "invitee_name": _invitee_name(subject, body, invitee_email, owner_name)[:256],
         "invitee_email": invitee_email[:320],
-        "when_text": _when_text(body)[:256],
+        "when_text": when_text[:256],
         "join_url": (join.group(0) if join else "")[:512],
         "subject": (subject or "").strip()[:512],
     }
