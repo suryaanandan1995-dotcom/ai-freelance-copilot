@@ -335,3 +335,125 @@ def test_run_pipeline_auto_email_skips_low_fit(temp_db, monkeypatch):
 
     assert stats["emailed"] == 0
     assert stats["emailed_skipped"].get("low_fit") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Attribution: a send must be identifiable afterwards
+#
+# Until 2026-08-20 a successful send logged NOTHING — only failures named the
+# recipient. That morning a cal.com call was booked the day after a run reporting
+# 'emailed': 1, and no readable source could say which company had been mailed: the
+# run log listed the four *proposed* (never-sent) addresses and the rejected post,
+# the sent one was the only address absent, and the database holding it is reachable
+# only with a DSN kept as a repo secret.
+#
+# The constraint that shapes the fix: this repository is PUBLIC, so its Actions logs
+# are public. Logging the full address would publish a prospect's personal data and
+# feed scrapers. The domain answers "which company?" and was published by the poster
+# themselves; the local part is masked.
+# --------------------------------------------------------------------------- #
+def test_masking_keeps_the_company_and_drops_the_person():
+    from outreach.sender import mask_address
+
+    assert mask_address("HR@bactrix.com") == "h***@bactrix.com"
+    assert mask_address("hello@proxify.ai") == "h***@proxify.ai"
+    # Case-normalised so the same mailbox never reads as two different companies.
+    assert mask_address("Team@Infisical.COM") == "t***@infisical.com"
+
+
+def test_masking_never_reveals_the_local_part_however_short():
+    """A one-character local part must not become the whole address."""
+    from outreach.sender import mask_address
+
+    masked = mask_address("a@example.com")
+    assert masked == "a***@example.com"
+    # The point of the mask is that the reader cannot reconstruct the mailbox: the
+    # only literal local-part character is the first, and *** stands for the rest
+    # whether the rest exists or not.
+    assert "***" in masked
+
+
+def test_masking_degrades_safely_on_junk():
+    """Never raise inside a log call, and never echo a full unknown string."""
+    from outreach.sender import mask_address
+
+    assert mask_address("") == "(none)"
+    assert mask_address(None) == "(none)"  # type: ignore[arg-type]
+    assert mask_address("   ") == "(none)"
+    # Not an address shape: keep one character so a typo stays recognisable in the
+    # log without printing whatever the value actually was.
+    assert mask_address("notanaddress") == "n***"
+
+
+def test_a_successful_send_names_the_recipient_domain_in_the_log(monkeypatch, caplog):
+    """The whole point: 'emailed: 1' must be traceable to a company from the log alone."""
+    import logging
+
+    from config import Settings
+    from outreach import sender
+
+    # sender.py does `from config import get_settings`, so the module-level name is
+    # what must be patched — patching config.get_settings leaves the bound reference.
+    monkeypatch.setattr(
+        sender,
+        "get_settings",
+        lambda: Settings(auto_email=True, smtp_host="smtp.example.com", smtp_user="",
+                         smtp_password="", owner_email="me@x.io"),
+    )
+
+    class FakeSMTP:
+        def __init__(self, host, port):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ehlo(self):
+            return None
+
+        def starttls(self):
+            return None
+
+        def send_message(self, msg):
+            return {}
+
+    import smtplib
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+
+    with caplog.at_level(logging.INFO, logger="outreach.sender"):
+        assert sender.send_outreach("HR@bactrix.com", "Quick question", "hi") is True
+
+    logged = caplog.text
+    assert "bactrix.com" in logged           # the company is identifiable
+    assert "HR@bactrix.com" not in logged    # the address itself is not published
+    assert "Quick question" in logged        # and the subject ties it to the thread
+
+
+def test_a_failed_send_also_masks_the_recipient(monkeypatch, caplog):
+    """The failure path predates the mask and leaked the full address into a public log."""
+    import logging
+    import smtplib
+
+    from config import Settings
+    from outreach import sender
+
+    monkeypatch.setattr(
+        sender,
+        "get_settings",
+        lambda: Settings(auto_email=True, smtp_host="smtp.example.com", owner_email="me@x.io"),
+    )
+
+    def boom(host, port):
+        raise smtplib.SMTPException("connection refused")
+
+    monkeypatch.setattr(smtplib, "SMTP", boom)
+
+    with caplog.at_level(logging.WARNING, logger="outreach.sender"):
+        assert sender.send_outreach("HR@bactrix.com", "s", "b") is False
+
+    assert "bactrix.com" in caplog.text
+    assert "HR@bactrix.com" not in caplog.text

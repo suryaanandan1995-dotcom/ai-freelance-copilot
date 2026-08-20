@@ -193,6 +193,15 @@ Run it: `python main.py dashboard` → `http://localhost:8000`. The same data is
 
 **Call tracking.** To complete the funnel (emailed → replied → **call booked** → won), add a [cal.com](https://cal.com) webhook for the `BOOKING_CREATED` event pointing at `https://<your-dashboard-host>/webhooks/cal`, and set the shared secret in `COPILOT_CAL_WEBHOOK_SECRET` (the endpoint verifies the `X-Cal-Signature-256` HMAC; leave the secret blank to skip verification in dev). When someone you've emailed books a call, that outreach row is stamped `call_booked_at` and the "Call booked" bar lights up in Analytics. The dashboard must be **publicly reachable** for the webhook to fire — a `localhost` instance won't receive it.
 
+**Naming the rows, not just counting them.** On **2026-08-20** a cal.com call was booked the morning after a run that reported `'emailed': 1` — and nothing readable could say *who had been emailed*. Every count was correct and every count was useless: the recipient lived in `OutreachRecord`, the database DSN is a repo secret, the dashboard is deliberately unhosted, and `outreach/sender.py` logged only **failed** sends, so a success left no trace at all. The run log helpfully listed the four *proposed* addresses that were never sent; the one address that mattered was the only one absent.
+
+Two fixes, both aimed at "a call just got booked — which company is that?":
+
+- **Every send now logs its recipient** (`send_outreach: SENT to h***@bactrix.com | subject=…`). Masked, not plain: this repository is **public**, so its Actions logs are public, and printing a prospect's full address would publish their personal data and feed scrapers. The domain answers "which company?" and was published by the poster themselves; the local part is theirs. The failure path was masked too — it had been leaking full addresses into a public log since the day it was written.
+- **`python main.py ledger --days 30`** prints one line per contact: masked address, status, `CALL BOOKED` / `replied` / `no reply (N follow-ups)`, plus the company, title, source and the original post URL. It runs on GitHub via the **Outreach Ledger** workflow (`workflow_dispatch`, plus Monday 07:45 UTC), so the answer needs no local machine, no hosted dashboard and no database password. That job is given `COPILOT_DATABASE_URL` and *deliberately no SMTP credentials* — it has no reason to send anything, so it has no way to.
+
+`kpi` says how many; `ledger` says who. A funnel you cannot enumerate is a funnel you cannot work.
+
 ## Cost Guardrail
 
 Every pipeline run creates a `CostTracker` seeded with `COPILOT_MAX_USD_PER_RUN` (default **$5.00**). The metered LLM wrapper checks the budget **before** each Claude call and records token usage **after**. When cumulative spend reaches the cap, the next call raises `BudgetExhausted`, the run stops cleanly, and the result is flagged `budget_exhausted: true` — no crash, no surprise bill. Pricing is tracked per model (Opus 4.8 at $5 / $25 per MTok).
@@ -593,6 +602,7 @@ ai-freelance-copilot/
 ├── tests/                      # offline test suite (no API key, no network)
 ├── Dockerfile · Makefile · requirements.txt · pyproject.toml
 └── .github/workflows/            # ci.yml · outreach.yml (scheduled auto-email) · reply.yml (scheduled auto-reply)
+                                  # ledger.yml (who was contacted, read-only, on demand)
 ```
 
 ## Prerequisites

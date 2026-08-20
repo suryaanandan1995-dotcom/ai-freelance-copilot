@@ -1,0 +1,61 @@
+name: Outreach Ledger
+
+# Answers "a call just got booked / a reply just came in — WHO is that?" without a
+# local machine, a hosted dashboard, or the database password.
+#
+# Why this exists: on 2026-08-20 a cal.com call was booked the morning after a run
+# that reported 'emailed': 1, and nothing readable anywhere could name the recipient.
+# The counts were in the database, the DSN is a repo secret, the dashboard is
+# deliberately unhosted, and outreach/sender.py logged only *failed* sends. So the
+# funnel could be counted but not enumerated — and you cannot prepare for a call with
+# a company you cannot identify.
+#
+# Read-only: it opens the database, prints, and exits. No sending, no writes, no
+# model calls, so it is free to run and safe to run at any time.
+#
+# Addresses are printed MASKED (h***@bactrix.com) because this repository is public
+# and so are its Actions logs. The domain identifies the company; the local part is
+# the prospect's personal data and stays out of a public log.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days of outreach history to list"
+        required: false
+        default: "30"
+  schedule:
+    # Monday 07:45 UTC — after the weekday 06:00 outreach and the 07:30 monitor, so
+    # the week opens with a named list of who is outstanding rather than a count.
+    - cron: "45 7 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ledger
+  cancel-in-progress: false
+
+jobs:
+  ledger:
+    name: List who was contacted
+    runs-on: ubuntu-latest
+    env:
+      COPILOT_DATABASE_URL: ${{ secrets.COPILOT_DATABASE_URL }}
+      # Deliberately NO SMTP credentials and no COPILOT_AUTO_EMAIL / AUTO_REPLY here.
+      # This job has no reason to send anything, so it is given no way to.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt psycopg2-binary
+
+      - name: Print the outreach ledger
+        run: python main.py ledger --days "${{ github.event.inputs.days || 30 }}"

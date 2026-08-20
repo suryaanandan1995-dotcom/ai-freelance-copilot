@@ -3,6 +3,12 @@ __pycache__/
 .venv/
 venv/
 .env
+# `.env` alone was not enough: a `.env.bak.20260820` written while editing the real
+# file was NOT ignored, and this repository is public — one `git add -A` would have
+# published the Anthropic key, the SMTP password and the database DSN. Ignore every
+# sibling and re-allow only the committed template.
+.env.*
+!.env.example
 *.db
 *.sqlite3
 data/*.json
