@@ -551,3 +551,76 @@ def test_reply_pass_reports_call_counters_even_with_replies_off(monkeypatch, tem
     assert stats["calls_booked"] == 1
     assert stats["calls_briefed"] == 1
     assert stats["inbound"] == 0  # replies really were skipped
+
+
+def test_list_masks_addresses_and_names_the_unbriefed(monkeypatch, temp_db, capsys):
+    """`calls --list` names the rows behind ``booked=2``, without publishing addresses.
+
+    The first production sweep reported ``booked=2`` when exactly one booking was known
+    about, and identifying the second required the database password. A count is not an
+    answer. This repository is public, so its Actions logs are public: the domain answers
+    "which company?", the local part is the invitee's own.
+    """
+    import main
+
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="uid-briefed",
+                invitee_name="Senthil Govindarajan",
+                invitee_email="senthil.govindarajan@gmail.com",
+                when_text="Friday, August 21, 2026 4:00pm - 4:15pm",
+                subject="Confirmed: 15 min meeting",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+        s.add(
+            CallRecord(
+                booking_uid="uid-silent",
+                invitee_name="Dana Whitfield",
+                invitee_email="dana@acme.io",
+                when_text="Monday, August 24, 2026 9:00am - 9:30am",
+                origin="inbound",
+                status="booked",
+                notified=False,
+            )
+        )
+
+    import argparse
+
+    assert main._cmd_calls(argparse.Namespace(list=True)) == 0
+    out = capsys.readouterr().out
+    assert "Senthil Govindarajan" in out
+    assert "Dana Whitfield" in out
+    # Masked, never whole.
+    assert "senthil.govindarajan@gmail.com" not in out
+    assert "s***@gmail.com" in out
+    assert "d***@acme.io" in out
+    # The one state worth acting on has to be visible per row, not only in an aggregate.
+    assert "BRIEFING NOT SENT" in out
+
+
+def test_list_says_so_when_there_are_no_bookings(temp_db, capsys):
+    import argparse
+
+    import main
+
+    assert main._cmd_calls(argparse.Namespace(list=True)) == 0
+    # "no bookings recorded yet" and an empty stdout read very differently in a log.
+    assert "no bookings recorded yet" in capsys.readouterr().out
+
+
+def test_list_never_sweeps_the_inbox(monkeypatch, temp_db):
+    """--list is a read. It must not log into IMAP and must not email anyone."""
+    import argparse
+
+    import main
+
+    monkeypatch.setattr(
+        detect_mod,
+        "scan_for_bookings",
+        lambda: (_ for _ in ()).throw(AssertionError("--list must not sweep")),
+    )
+    assert main._cmd_calls(argparse.Namespace(list=True)) == 0

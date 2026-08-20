@@ -67,3 +67,11 @@ jobs:
           python main.py ledger \
             --days "${{ github.event.inputs.days || 30 }}" \
             ${{ github.event.inputs.body == 'true' && '--body' || '' }}
+
+      # Bookings are the outcome the ledger exists to explain, and an INBOUND booking has
+      # no outreach row to appear in — so without this the most important line in the
+      # funnel is the one the ledger cannot print. `--list` reads only and sends nothing,
+      # which is why it belongs in the job that deliberately has no SMTP credentials.
+      - name: List booked calls
+        if: always()
+        run: python main.py calls --list
