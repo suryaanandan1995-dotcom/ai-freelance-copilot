@@ -163,9 +163,45 @@ def test_infrastructure_addresses_are_never_the_invitee():
     body = REAL_BOOKING_BODY.replace(
         "senthil.govindarajan@gmail.com", "no-reply@cal.com"
     )
-    booking = _parse(body=body)
-    # Everything left is ours or cal.com's, so there is no invitee to claim.
-    assert booking["invitee_email"] == ""
+    # Everything left is ours or cal.com's, so there is nobody to brief about — and
+    # "CALL BOOKED — (unknown)" is worse than silence.
+    assert _parse(body=body) is None
+
+
+def test_a_cal_com_product_email_is_not_a_booking():
+    """The false positive from the first production sweep, pinned.
+
+    cal.com's release notes matched the old marker list ("new event", "confirmed") and the
+    owner was emailed a briefing for a call that did not exist. A check that fires for a
+    reason unrelated to the one it exists for is worse than no check — so the guard is now
+    structural: a booking names a person and a time, and marketing mail names neither.
+    """
+    changelog = """\
+Changelog: Cal.com v6.8 - Cal Events, New troubleshooter, AI chat in routing forms & more
+
+Cal Events is here. Your new event types are confirmed instantly and the
+troubleshooter shows why a slot is scheduled or not.
+
+Questions? support@cal.com
+Unsubscribe from product updates
+"""
+    assert (
+        _parse(
+            subject="Changelog: Cal.com v6.8 - Cal Events, New troubleshooter",
+            body=changelog,
+            message_id="<JBjEJYhrQ3iQcb8mra2yIw@geopod-ismtpd-67>",
+        )
+        is None
+    )
+
+
+def test_a_booking_without_a_time_is_not_briefed():
+    # Half a booking is not a booking: the owner cannot prepare for "at ?", and a row with
+    # neither field is one the dedupe key would then protect forever.
+    body = REAL_BOOKING_BODY.replace("Friday, August 21, 2026\n", "").replace(
+        "4:00pm - 4:15pm (Atlantic/Reykjavik)\n", ""
+    )
+    assert _parse(body=body) is None
 
 
 def test_message_id_is_the_fallback_uid_without_a_video_link():
@@ -200,8 +236,14 @@ def test_subject_name_handles_the_owner_listed_second():
 
 def test_name_falls_back_to_the_address_local_part():
     booking = parse_mod.parse_booking(
-        subject="Confirmed: intro call",
-        body="Confirmed\nsomeone@acme.io\nhttps://app.cal.com/video/xyz789",
+        subject="Your meeting is scheduled",
+        body=(
+            "Confirmed\n"
+            "Monday, September 1, 2026\n"
+            "10:00am - 10:15am (UTC)\n"
+            "someone@acme.io\n"
+            "https://app.cal.com/video/xyz789"
+        ),
         message_id=None,
         owner_addresses=OURS,
         owner_name=OWNER_NAME,
@@ -345,6 +387,7 @@ def test_detection_off_is_a_silent_no_op(monkeypatch, temp_db, sent):
         "cancelled": 0,
         "briefed": 0,
         "already_known": 0,
+        "purged": 0,
         "errors": 0,
     }
     assert sent == []
@@ -624,3 +667,58 @@ def test_list_never_sweeps_the_inbox(monkeypatch, temp_db):
         lambda: (_ for _ in ()).throw(AssertionError("--list must not sweep")),
     )
     assert main._cmd_calls(argparse.Namespace(list=True)) == 0
+
+
+def test_rows_the_old_parser_wrote_are_healed_away(monkeypatch, temp_db, sent):
+    """A row with neither person nor time is deleted, not left in every listing forever.
+
+    Self-healing rather than a cleanup command: the standing requirement is no manual
+    steps. The set is closed — the parser now refuses such mail outright — so this can only
+    ever remove rows written by the version that was wrong.
+    """
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="<JBjEJYhrQ3iQcb8mra2yIw@geopod-ismtpd-67>",
+                invitee_name="(unknown)",
+                invitee_email="",
+                when_text="",
+                subject="Changelog: Cal.com v6.8 - Cal Events, New troubleshooter",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+    _fake_inbox(monkeypatch, [_real_message()])
+
+    stats = detect_mod.scan_for_bookings()
+    assert stats["purged"] == 1
+    with dbsession.get_session() as s:
+        rows = s.query(CallRecord).all()
+        # The real booking survives; the changelog row does not.
+        assert [r.invitee_email for r in rows] == ["senthil.govindarajan@gmail.com"]
+
+
+def test_purge_never_touches_a_real_booking(monkeypatch, temp_db, sent):
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    _fake_inbox(monkeypatch, [_real_message()])
+    detect_mod.scan_for_bookings()
+    # A booking with an address but no parsed time is incomplete, not junk: it names
+    # somebody, so deleting it would lose a real call.
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="uid-no-time",
+                invitee_name="Dana Whitfield",
+                invitee_email="dana@acme.io",
+                when_text="",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+    second = detect_mod.scan_for_bookings()
+    assert second["purged"] == 0
+    with dbsession.get_session() as s:
+        assert s.query(CallRecord).count() == 2

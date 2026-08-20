@@ -232,6 +232,7 @@ def scan_for_bookings() -> dict:
         "cancelled": 0,
         "briefed": 0,
         "already_known": 0,
+        "purged": 0,
         "errors": 0,
     }
     if not getattr(settings, "detect_calls", True):
@@ -255,6 +256,7 @@ def scan_for_bookings() -> dict:
     from runlog import send_alert
 
     init_db()
+    stats["purged"] = _purge_unattributable()
     ours = _owner_addresses(settings)
     owner_name = getattr(settings, "owner_name", "")
 
@@ -359,6 +361,37 @@ def scan_for_bookings() -> dict:
     # Retry any briefing that was detected earlier but never reached the owner.
     stats["briefed"] += _retry_unnotified(settings)
     return stats
+
+
+def _purge_unattributable() -> int:
+    """Delete rows naming neither a person nor a time. Returns how many were removed.
+
+    Self-healing rather than a manual cleanup command, because the standing requirement is
+    full automation. The first production sweep matched a cal.com *changelog* email and
+    wrote a row with no invitee and no time — a permanent "[BOOKED] (unknown) — ?" line in
+    every listing, and one the dedupe key would protect forever. The parser now refuses
+    such mail outright, so this set is closed: it can only ever contain rows written by
+    the version of the parser that was wrong.
+    """
+    from db.models import CallRecord
+    from db.session import get_session
+
+    try:
+        with get_session() as session:
+            junk = (
+                session.query(CallRecord)
+                .filter(CallRecord.invitee_email == "", CallRecord.when_text == "")
+                .all()
+            )
+            for row in junk:
+                logger.info(
+                    "calls: purging an unattributable row (subject=%r)", row.subject
+                )
+                session.delete(row)
+            return len(junk)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("calls: purge of unattributable rows failed: %s", exc)
+        return 0
 
 
 def _retry_unnotified(settings) -> int:
