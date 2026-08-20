@@ -75,3 +75,12 @@ jobs:
       - name: List booked calls
         if: always()
         run: python main.py calls --list
+
+      # The funnel that names which CHANNEL produced those bookings. It rides in the digest
+      # email, which means it was only ever visible on a day the outreach pass both ran and
+      # sent — so on the day a call was actually booked, the numbers explaining it were
+      # unreachable without a database password. Counts only: no addresses, safe in a
+      # public log.
+      - name: Print the outcome funnel
+        if: always()
+        run: python main.py kpi --days "${{ github.event.inputs.days || 30 }}"
