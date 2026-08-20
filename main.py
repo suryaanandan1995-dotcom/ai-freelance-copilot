@@ -309,7 +309,7 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_calls(_args: argparse.Namespace) -> int:
+def _cmd_calls(args: argparse.Namespace) -> int:
     """Sweep the inbox for cal.com bookings and email the owner a briefing for each.
 
     Runs inside the reply pass too; it exists as its own command so the daily monitor can
@@ -317,6 +317,9 @@ def _cmd_calls(_args: argparse.Namespace) -> int:
     schedule, and a call on Monday morning is exactly the one that needs the briefing.
     """
     from calls.detect import scan_for_bookings
+
+    if getattr(args, "list", False):
+        return _list_calls()
 
     stats = scan_for_bookings()
     print(
@@ -328,6 +331,43 @@ def _cmd_calls(_args: argparse.Namespace) -> int:
         # The row exists but the owner was not told, which is the only failure mode that
         # matters here — say so loudly instead of exiting 0 on a silent success.
         print("calls: WARNING a booking was detected but no briefing was sent (SMTP?)")
+    return 0
+
+
+def _list_calls() -> int:
+    """Print every stored booking. Reads only; sends nothing; masks every address.
+
+    The counters above say *how many* bookings were found, which is exactly as useless as
+    "0 calls booked" was: on the first production sweep the answer was ``booked=2`` and
+    naming the second one required a database password. Same lesson as the ledger — a
+    funnel you cannot enumerate is a funnel you cannot work.
+    """
+    from db.models import CallRecord, LeadRecord
+    from db.session import get_session, init_db
+    from outreach.sender import mask_address
+
+    init_db()
+    with get_session() as session:
+        rows = session.query(CallRecord).order_by(CallRecord.created_at.desc()).all()
+        if not rows:
+            print("calls: no bookings recorded yet.")
+            return 0
+        print(f"calls: {len(rows)} booking(s) recorded\n")
+        for row in rows:
+            company = ""
+            if row.lead_id:
+                lead = session.query(LeadRecord).filter(LeadRecord.id == row.lead_id).first()
+                if lead is not None:
+                    company = f" | {lead.company or '?'} — {lead.title or '?'}"
+            flag = row.status.upper()
+            if not row.notified:
+                # The one state worth acting on: the call exists and the owner was
+                # never told. Say so per row, not just in the aggregate.
+                flag += " (BRIEFING NOT SENT)"
+            print(f"  [{flag}] {row.invitee_name or '(unknown)'} — {row.when_text or '?'}")
+            print(f"      who    : {mask_address(row.invitee_email)} ({row.origin}){company}")
+            print(f"      subject: {row.subject or '(none)'}")
+            print(f"      uid    : {row.booking_uid}")
     return 0
 
 
@@ -435,6 +475,15 @@ def build_parser() -> argparse.ArgumentParser:
             "sat unread. This reads the confirmation email instead, stamps "
             "call_booked_at, and emails who booked, why they probably booked and how to "
             "run the 15 minutes. Read-only against mail; one briefing per booking."
+        ),
+    )
+    p_calls.add_argument(
+        "--list",
+        action="store_true",
+        help=(
+            "Do not sweep or send: print the bookings already recorded (masked "
+            "addresses), including any whose briefing never left. Answers 'it says two "
+            "calls were booked — who?' without a database password."
         ),
     )
     p_calls.set_defaults(func=_cmd_calls)
