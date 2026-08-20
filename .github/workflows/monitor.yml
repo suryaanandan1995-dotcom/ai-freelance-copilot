@@ -52,3 +52,14 @@ jobs:
 
       - name: Run health monitor
         run: python main.py doctor
+
+      # The reply workflow already sweeps for bookings, but only on weekdays 08:00-18:00.
+      # Someone booking on a Saturday for a Monday 09:00 call would be briefed after the
+      # call had already started. This daily 07:30 pass closes that gap.
+      #
+      # `if: always()` because a booked call is worth more than a clean monitor run: the
+      # doctor exits non-zero only when the monitor itself crashed, and that must not be
+      # the reason the owner walks into a call unprepared.
+      - name: Detect booked calls and brief the owner
+        if: always()
+        run: python main.py calls
