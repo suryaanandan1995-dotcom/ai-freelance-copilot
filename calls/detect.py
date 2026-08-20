@@ -63,6 +63,35 @@ def _decode(value: str | None) -> str:
         return value
 
 
+def _body_text(msg) -> str:
+    """The message body, preferring text/plain but accepting text/html.
+
+    ``reply.inbox._plain_body`` returns "" for a multipart message with no text/plain
+    part, and cal.com's confirmation is written for humans in HTML. Returning "" there
+    would make an HTML-only booking look like an empty email — detected as nothing, with
+    no error anywhere. ``calls.parse.visible_text`` strips the markup afterwards.
+    """
+    from reply.inbox import _plain_body
+
+    plain = _plain_body(msg)
+    if plain.strip():
+        return plain
+    try:
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() != "text/html":
+                    continue
+                if "attachment" in str(part.get("Content-Disposition") or ""):
+                    continue
+                payload = part.get_payload(decode=True)
+                if payload is not None:
+                    charset = part.get_content_charset() or "utf-8"
+                    return payload.decode(charset, errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("calls: could not read an HTML body: %s", exc)
+    return plain
+
+
 def _latest_published_post():
     """The most recent LinkedIn post — the likeliest referrer for an inbound booking."""
     try:
@@ -191,12 +220,10 @@ def _fetch_cal_mail(settings, limit: int = 40) -> list[dict]:
                 # "cal.com" would match too. Confirm the sending domain.
                 if not sender.endswith("cal.com"):
                     continue
-                from reply.inbox import _plain_body
-
                 out.append(
                     {
                         "subject": _decode(msg.get("Subject")),
-                        "body": _plain_body(msg),
+                        "body": _body_text(msg),
                         "message_id": (msg.get("Message-ID") or "").strip() or None,
                     }
                 )
@@ -287,6 +314,31 @@ def scan_for_bookings() -> dict:
                         subject, body = brief_mod.build_cancellation(booking)
                         if send_alert(subject, body):
                             stats["briefed"] += 1
+                    elif _fill_in_gaps(existing, booking):
+                        # The first briefing went out saying "(time not parsed — see the
+                        # cal.com email)" because the confirmation is HTML-only and the
+                        # parser was reading markup. Now that the time is known, the owner
+                        # gets it: they were told to go and look it up themselves, for a
+                        # call that may be tomorrow. Guarded on the field having been
+                        # blank, so this cannot become a per-pass re-send.
+                        booking_for_brief = {
+                            **booking,
+                            "invitee_name": existing.invitee_name or booking["invitee_name"],
+                        }
+                        origin, lead, pitch = _match_outreach(existing.invitee_email)
+                        subject, body = brief_mod.build_brief(
+                            booking=booking_for_brief,
+                            origin=origin,
+                            lead=lead,
+                            pitch=pitch,
+                            latest_post=(
+                                _latest_published_post() if origin != "outreach" else None
+                            ),
+                        )
+                        if send_alert(subject, body):
+                            stats["briefed"] += 1
+                            logger.info("calls: re-briefed a booking whose details filled in")
+                        stats["already_known"] += 1
                     else:
                         stats["already_known"] += 1
                     continue
@@ -361,6 +413,30 @@ def scan_for_bookings() -> dict:
     # Retry any briefing that was detected earlier but never reached the owner.
     stats["briefed"] += _retry_unnotified(settings)
     return stats
+
+
+def _fill_in_gaps(row, booking: dict) -> bool:
+    """Backfill fields an earlier, worse parser left blank. True when something material
+    changed — meaning the owner's first briefing was missing it.
+
+    Only ever fills BLANKS. Overwriting a populated field would let a later, differently
+    formatted copy of the same mail (a reminder, a forward) quietly rewrite a booking the
+    owner has already read, and re-notify them for a change they did not make.
+    """
+    material = False
+    if not row.when_text and booking.get("when_text"):
+        row.when_text = booking["when_text"]
+        material = True
+    if not row.join_url and booking.get("join_url"):
+        row.join_url = booking["join_url"]
+        material = True
+    if not row.invitee_email and booking.get("invitee_email"):
+        row.invitee_email = booking["invitee_email"]
+        material = True
+    # Cosmetic: a better name is worth storing but is not worth a second email.
+    if booking.get("invitee_name") and row.invitee_name in ("", "(unknown)"):
+        row.invitee_name = booking["invitee_name"]
+    return material
 
 
 def _purge_unattributable() -> int:
