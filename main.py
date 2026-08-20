@@ -215,6 +215,77 @@ def _cmd_linkedin_post(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_ledger(args: argparse.Namespace) -> int:
+    """Print WHO we contacted, and what came back — one masked line per send.
+
+    Written on 2026-08-20, the day a cal.com call was booked and the pipeline could not
+    say who had booked it. ``kpi`` counts the funnel (6 emailed, 1 replied); nothing
+    named the rows. The counts live in the database, the database DSN is a repo secret,
+    the dashboard is deliberately unhosted, and the run log recorded only *failed*
+    sends — so the one question that matters after a booking, "which company is this?",
+    had no answer anywhere. A funnel you cannot enumerate is a funnel you cannot work.
+
+    Runs on GitHub (``ledger.yml``, workflow_dispatch) so the answer needs no local
+    machine, and masks local-parts because this repository — and therefore its Actions
+    log — is public.
+    """
+    import datetime as _dt
+
+    from db.models import LeadRecord, OutreachRecord
+    from db.session import get_session, init_db
+    from outreach.sender import mask_address
+
+    days = max(1, int(getattr(args, "days", 30) or 30))
+    cutoff = _dt.datetime.utcnow() - _dt.timedelta(days=days)
+
+    init_db()
+    with get_session() as session:
+        rows = (
+            session.query(OutreachRecord)
+            .filter(OutreachRecord.sent_at >= cutoff)
+            .order_by(OutreachRecord.sent_at.desc())
+            .all()
+        )
+        leads = {
+            lead.id: lead
+            for lead in session.query(LeadRecord)
+            .filter(LeadRecord.id.in_([r.lead_id for r in rows if r.lead_id]))
+            .all()
+        } if rows else {}
+
+        print(f"Outreach ledger — last {days} day(s): {len(rows)} contact(s)\n")
+        if not rows:
+            print("  (nothing sent in this window)")
+            return 0
+        for r in rows:
+            lead = leads.get(r.lead_id)
+            # Booked first, then replied: the strongest signal leads the line, so the
+            # row worth acting on is findable by eye in a log with no search.
+            if r.call_booked_at:
+                flag = f"CALL BOOKED {r.call_booked_at:%Y-%m-%d}"
+            elif r.replied:
+                flag = "replied"
+            else:
+                flag = f"no reply ({r.followups_sent} follow-up(s))"
+            print(
+                f"  {r.sent_at:%Y-%m-%d %H:%M}  {mask_address(r.email):<34}"
+                f"  {r.status:<10}  {flag}"
+            )
+            print(f"      subject: {r.subject or '(none)'}")
+            if lead is not None:
+                print(
+                    f"      lead   : {lead.company or '?'} — {lead.title or '?'} "
+                    f"[{lead.source}]"
+                )
+                if lead.url:
+                    print(f"      post   : {lead.url}")
+            else:
+                # Sends predate the lead_id link, or the lead row was deleted. Say so
+                # rather than print a blank line that reads like "no such company".
+                print("      lead   : (not linked to a stored lead)")
+    return 0
+
+
 def _cmd_doctor(_args: argparse.Namespace) -> int:
     from monitor.doctor import format_report, run_healthcheck
     from runlog import record_run
@@ -273,6 +344,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=int, default=30, help="Rolling window in days (default 30)."
     )
     p_kpi.set_defaults(func=_cmd_kpi)
+
+    p_ledger = sub.add_parser(
+        "ledger",
+        help="List WHO was contacted and what came back (masked addresses).",
+        description=(
+            "kpi counts the funnel; ledger names the rows. Answers 'a call was just "
+            "booked — which company is that?' from the Actions log alone."
+        ),
+    )
+    p_ledger.add_argument(
+        "--days", type=int, default=30, help="Rolling window in days (default 30)."
+    )
+    p_ledger.set_defaults(func=_cmd_ledger)
 
     p_reply = sub.add_parser(
         "reply",

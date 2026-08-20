@@ -49,6 +49,31 @@ def _known_repos(settings) -> set[str]:
         return set()
 
 
+def mask_address(address: str) -> str:
+    """``HR@bactrix.com`` -> ``h***@bactrix.com``: identifies the company, not the person.
+
+    Every send used to be logged as nothing at all — only *failures* named the
+    recipient — so on 2026-08-20, with a cal.com call booked the morning after a run
+    that reported ``'emailed': 1``, there was no readable record anywhere of who that
+    one email went to. The run log had the four *proposed* addresses (never sent) and
+    the rejected Bactrix post, and the one address that mattered was the only one
+    absent. "Sent 1" without a recipient is a success counter with no subject.
+
+    Masked rather than plain because **this repository is public**, so its Actions logs
+    are public: printing a prospect's full address publishes it to scrapers and turns
+    our own outreach into someone else's spam problem. The domain is what answers
+    "which company is this?", and the domain is not private — the post published it.
+    """
+    address = (address or "").strip()
+    if not address:
+        return "(none)"
+    local, _, domain = address.rpartition("@")
+    if not domain or not local:
+        # Not an address shape; keep one character so a typo is still recognisable.
+        return f"{address[0]}***"
+    return f"{local[0].lower()}***@{domain.lower()}"
+
+
 def _footer(settings) -> str:
     """Plain-text identity + opt-out footer, always appended to every send."""
     mailbox = settings.opt_out_mailbox or settings.owner_email
@@ -94,7 +119,12 @@ def send_outreach(to: str, subject: str, body: str) -> bool:
             if settings.smtp_user:
                 smtp.login(settings.smtp_user, settings.smtp_password)
             smtp.send_message(msg)
+        # A send is the single most consequential event this system performs, and until
+        # now it was the only one that left no trace in the log. Attribution has to be
+        # possible from the Actions log alone, because that is the only production
+        # surface readable without the database DSN (a repo secret).
+        logger.info("send_outreach: SENT to %s | subject=%r", mask_address(to), subject)
         return True
     except Exception as exc:  # never break the caller's loop
-        logger.warning("send_outreach: send to %s failed: %s", to, exc)
+        logger.warning("send_outreach: send to %s failed: %s", mask_address(to), exc)
         return False
