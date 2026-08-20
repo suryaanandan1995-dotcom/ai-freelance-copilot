@@ -24,6 +24,11 @@ on:
         description: "How many days of outreach history to list"
         required: false
         default: "30"
+      body:
+        description: "Also print the pitch that was sent (needed before a booked call)"
+        type: boolean
+        required: false
+        default: false
   schedule:
     # Monday 07:45 UTC — after the weekday 06:00 outreach and the 07:30 monitor, so
     # the week opens with a named list of who is outstanding rather than a count.
@@ -58,4 +63,7 @@ jobs:
         run: pip install -r requirements.txt psycopg2-binary
 
       - name: Print the outreach ledger
-        run: python main.py ledger --days "${{ github.event.inputs.days || 30 }}"
+        run: |
+          python main.py ledger \
+            --days "${{ github.event.inputs.days || 30 }}" \
+            ${{ github.event.inputs.body == 'true' && '--body' || '' }}

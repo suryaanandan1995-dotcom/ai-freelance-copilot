@@ -165,3 +165,58 @@ def test_ledger_is_wired_into_the_cli(temp_db):
     parsed = parser.parse_args(["ledger", "--days", "7"])
     assert parsed.func is main._cmd_ledger
     assert parsed.days == 7
+
+
+# --------------------------------------------------------------------------- #
+# --body: what did we actually claim?
+#
+# The pitch is written by an agent and sent without a human reading it. That is fine
+# right up to the moment a call is booked, at which point the person taking the call
+# has to defend claims they have never seen. The ledger is the only place that can
+# hand those back.
+# --------------------------------------------------------------------------- #
+def _seed_pitch(body: str) -> None:
+    from db.models import ProposalRecord
+
+    with dbsession.get_session() as s:
+        lead = s.query(LeadRecord).first()
+        s.add(ProposalRecord(lead_id=lead.id, body=body))
+
+
+def test_body_flag_prints_the_pitch_that_was_sent(temp_db, capsys):
+    _seed_contact(email="chris@earl.partners", company="Earl")
+    _seed_pitch("I build production LLM systems.\nHappy to start with a paid trial.")
+
+    import argparse
+
+    main._cmd_ledger(argparse.Namespace(days=30, body=True))
+    out = capsys.readouterr().out
+    assert "what we claimed" in out
+    assert "I build production LLM systems." in out
+    assert "Happy to start with a paid trial." in out  # multi-line pitch kept intact
+
+
+def test_the_pitch_is_omitted_by_default(temp_db, capsys):
+    """The default listing stays scannable; bodies are opt-in."""
+    _seed_contact(email="chris@earl.partners", company="Earl")
+    _seed_pitch("secret sauce")
+    main._cmd_ledger(_args())
+    out = capsys.readouterr().out
+    assert "secret sauce" not in out
+    assert "what we claimed" not in out
+
+
+def test_a_contact_with_no_stored_pitch_says_so(temp_db, capsys):
+    """Missing must read as missing, not as an empty pitch."""
+    _seed_contact(email="chris@earl.partners", company="Earl")
+
+    import argparse
+
+    main._cmd_ledger(argparse.Namespace(days=30, body=True))
+    assert "no stored pitch for this contact" in capsys.readouterr().out
+
+
+def test_body_is_wired_into_the_cli(temp_db):
+    parser = main.build_parser()
+    assert parser.parse_args(["ledger", "--body"]).body is True
+    assert parser.parse_args(["ledger"]).body is False
