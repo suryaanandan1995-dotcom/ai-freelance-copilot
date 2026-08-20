@@ -342,3 +342,42 @@ def test_qualifier_rubric_scores_remote_roles_worldwide_not_just_the_uk():
     low = prompt.lower()
     assert "remotely" in low or "remote" in low
     assert "neither is the country" in low
+
+
+def test_the_model_is_never_asked_to_echo_the_lead_back():
+    """The crash of 2026-08-20, as a test.
+
+    ``qualify`` overwrites the model's ``lead`` with the one it was passed, so asking for
+    it bought nothing and cost a validation surface: on production run 32339343714 Sonnet
+    returned ``lead`` as a JSON *string* and omitted ``fit_score``, pydantic raised inside
+    ``with_structured_output``, and the exception ended a 39-minute, $2.46 run — digest,
+    five apply packs and four proposed addresses included.
+
+    Asserting on the SCHEMA rather than on a happy path, because the bug was not that a
+    field parsed wrongly. It was that the field was requested at all.
+    """
+    from core.schemas import FitVerdict
+
+    seen: list[object] = []
+
+    class SchemaSpy(FakeChat):
+        def with_structured_output(self, schema, **kw):
+            seen.append(schema)
+            return super().with_structured_output(schema, **kw)
+
+    chat = SchemaSpy(structured={"fit_score": 74, "reasons": ["ok"], "matched_projects": []})
+    scored = qualify(_lead(), chat=chat)
+
+    assert seen == [FitVerdict], "the wire schema must be the verdict, not the whole lead"
+    assert "lead" not in FitVerdict.model_fields
+    # The lead still arrives intact on the way out — attached locally, not parsed back.
+    assert scored.lead.external_id == "job-123"
+    assert scored.fit_score == 74
+
+
+def test_a_verdict_without_the_lead_field_is_enough_to_score():
+    """Exactly the payload that used to fail: scoring fields only, no ``lead`` key."""
+    chat = FakeChat(structured={"fit_score": 91, "reasons": ["k8s"], "matched_projects": []})
+    scored = qualify(_lead(), chat=chat)
+    assert scored.fit_score == 91
+    assert scored.lead.title.startswith("Kubernetes")

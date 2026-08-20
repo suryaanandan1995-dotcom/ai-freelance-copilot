@@ -86,6 +86,13 @@ jobs:
         # This sends nothing: COPILOT_AUTO_REPLY is not set here, so the pass runs
         # in detection-only mode (records the inbound, marks the lead replied,
         # honours opt-outs). The separate Auto-Reply workflow does the answering.
+        #
+        # always(): on 2026-08-20 the pipeline step above exited 1 and this step was
+        # SKIPPED, so nobody read the inbox that morning. Reading replies has no
+        # dependency on the outreach pass succeeding, and skipping it is the one
+        # failure that reaches the prospect: an undetected reply never sets
+        # ``replied``, so the follow-up wave nudges someone who already answered.
+        if: always()
         continue-on-error: true
         run: python main.py reply
 
@@ -95,5 +102,11 @@ jobs:
         # suppression list as the initial outreach; no-op if the gate is off.
         # Secondary step — must NOT fail the run: the primary outreach already ran
         # above, so a follow-up hiccup shouldn't mark the pipeline failed.
+        #
+        # Deliberately NOT if:always(), unlike the inbox read above. That asymmetry is
+        # the point: reading the inbox is always safe and always useful, while sending
+        # into a run that died for an unknown reason is not. A nudge delayed a day costs
+        # nothing; a nudge sent from indeterminate state costs sender reputation, which
+        # is the one asset here that cannot be rebought.
         continue-on-error: true
         run: python main.py followup

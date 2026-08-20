@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from config import get_settings
-from core.schemas import Lead, ScoredLead
+from core.schemas import FitVerdict, Lead, ScoredLead
 
 from .llm import get_chat
 
@@ -195,7 +195,10 @@ def qualify(lead: Lead, retriever: Any = None, chat: Any = None) -> ScoredLead:
     """
     settings = get_settings()
     model = get_chat(settings.model_sonnet, chat=chat)
-    structured = model.with_structured_output(ScoredLead)
+    # FitVerdict, not ScoredLead: the model is asked for the three fields it decides and
+    # nothing else. Asking for ``lead`` too — a field this function overwrites six lines
+    # below — is what killed run 32339343714. See :class:`core.schemas.FitVerdict`.
+    structured = model.with_structured_output(FitVerdict)
 
     projects = portfolio_projects()
 
@@ -227,9 +230,9 @@ def qualify(lead: Lead, retriever: Any = None, chat: Any = None) -> ScoredLead:
         {"role": "system", "content": _system_prompt(projects)},
         {"role": "user", "content": text},
     ]
-    result: ScoredLead = structured.invoke(messages)
+    result: FitVerdict = structured.invoke(messages)
 
-    # The model returns the scoring fields; ensure the lead is the one we passed.
+    # The model returns the scoring fields; the lead is the one we passed, never echoed.
     return ScoredLead(
         lead=lead,
         fit_score=max(0, min(100, int(result.fit_score))),

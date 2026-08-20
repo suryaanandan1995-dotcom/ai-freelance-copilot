@@ -393,3 +393,50 @@ def test_doctor_includes_the_discovery_check(temp_db, monkeypatch):
     _settings(monkeypatch, discover_contacts=True)
     names = {c["name"] for c in doctor.run_healthcheck()["checks"]}
     assert "discovery" in names
+
+
+# --------------------------------------------------------------------------- #
+# lead_errors — the quiet partial failure the per-lead catch created
+# --------------------------------------------------------------------------- #
+def test_a_run_that_dropped_a_third_of_its_leads_is_a_failure(temp_db, monkeypatch):
+    """Catching per-lead exceptions traded a loud total failure for a quiet partial one.
+    This is the check that keeps the quiet one from reading as a clean run."""
+    _seed([{"new": 175, "lead_errors": 60, "emailed": 1, "queued": 2}])
+
+    result = funnel.check_lead_errors()
+    assert result["ok"] is False
+    assert "60 of 175" in result["detail"] and "34%" in result["detail"]
+
+
+def test_one_bad_model_response_in_175_is_the_weather(temp_db, monkeypatch):
+    """Ratio, not count: an occasional malformed response is not an incident, and a check
+    that fires on it gets muted, taking the 34% case with it."""
+    _seed([{"new": 175, "lead_errors": 1, "emailed": 1}])
+    assert funnel.check_lead_errors()["ok"] is True
+
+
+def test_no_lead_errors_passes_cleanly(temp_db, monkeypatch):
+    _seed([{"new": 175, "lead_errors": 0}])
+    result = funnel.check_lead_errors()
+    assert result["ok"] is True
+    assert "no leads failed" in result["detail"]
+
+
+def test_errors_with_no_lead_total_are_still_reported(temp_db, monkeypatch):
+    """A missing denominator must not silently become a passing rate."""
+    _seed([{"lead_errors": 4}])
+    result = funnel.check_lead_errors()
+    assert result["ok"] is False
+    assert "unrecorded" in result["detail"]
+
+
+def test_runs_predating_the_lead_error_counter_do_not_alert(temp_db, monkeypatch):
+    _seed([{"new": 175, "emailed": 2}])
+    assert funnel.check_lead_errors()["ok"] is True
+
+
+def test_doctor_includes_the_lead_error_check(temp_db, monkeypatch):
+    import monitor.doctor as doctor
+
+    names = {c["name"] for c in doctor.run_healthcheck()["checks"]}
+    assert "lead_errors" in names

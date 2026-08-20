@@ -1214,3 +1214,88 @@ def test_a_source_pulling_its_weight_on_contacts_is_not_called_unreachable():
     note = _contact_overlap_note(rows, 70)
     assert "jobicy" not in note
     assert "79 qualified lead(s)" in note
+
+
+# --------------------------------------------------------------------------- #
+# one bad lead must not cost the run
+# --------------------------------------------------------------------------- #
+def test_one_leads_failure_does_not_lose_the_other_leads(temp_db, monkeypatch, caplog):
+    """Production run 32339343714, as a test.
+
+    One lead's structured-output parse raised a ``ValidationError`` inside the graph. It
+    propagated out of the lead loop, out of ``run_pipeline``, and exited 1 after 39
+    minutes and $2.46 — taking the digest, five apply packs and four proposed addresses
+    with it, and skipping the workflow's later inbox-read step entirely.
+
+    The lead loop is N independent units of work; the 2nd must not be able to cancel the
+    other four.
+    """
+    import agents.graph as graph
+    from pipeline import run_pipeline
+
+    real_run_lead = graph.run_lead
+    calls: list[str] = []
+
+    def _explode_on_the_second(lead, **kw):
+        calls.append(lead.external_id)
+        if len(calls) == 2:
+            raise ValueError("2 validation errors for ScoredLead")
+        return real_run_lead(lead, **kw)
+
+    monkeypatch.setattr(graph, "run_lead", _explode_on_the_second)
+
+    with caplog.at_level("WARNING"):
+        stats = run_pipeline(
+            sources=[FakeSource([_lead(i) for i in range(1, 6)])],
+            retriever=FakeRetriever(),
+            chat=_high_fit_chat(),
+        )
+
+    assert len(calls) == 5, "every lead was still attempted"
+    assert stats["lead_errors"] == 1
+    # And the run still produced its output rather than dying at lead 2.
+    assert stats["queued"] >= 1
+    assert "lead failed, skipping it" in caplog.text
+    # The exception type is in the log: "something failed" without it is unactionable.
+    assert "ValueError" in caplog.text
+
+
+def test_a_clean_run_reports_zero_lead_errors(temp_db):
+    """The counter ships with its denominator — a key that only appears on failure
+    teaches a reader that its absence means nothing rather than means zero."""
+    from pipeline import run_pipeline
+
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(1), _lead(2)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+    assert stats["lead_errors"] == 0
+
+
+def test_the_budget_guard_still_stops_the_run(temp_db, monkeypatch):
+    """The new blanket ``except`` must not swallow ``BudgetExhausted``.
+
+    That would turn a hard spend ceiling into a per-lead retry loop against a live API —
+    the guard failing in the one direction that costs real money.
+    """
+    import agents.graph as graph
+    from costs import BudgetExhausted
+    from pipeline import run_pipeline
+
+    calls: list[str] = []
+
+    def _out_of_money(lead, **kw):
+        calls.append(lead.external_id)
+        raise BudgetExhausted("run budget exhausted")
+
+    monkeypatch.setattr(graph, "run_lead", _out_of_money)
+
+    stats = run_pipeline(
+        sources=[FakeSource([_lead(i) for i in range(1, 6)])],
+        retriever=FakeRetriever(),
+        chat=_high_fit_chat(),
+    )
+    assert len(calls) == 1, "the run stopped at the first refusal, it did not retry 5 times"
+    assert stats["budget_exhausted"] is True
+    assert stats["lead_errors"] == 0, "running out of budget is not a lead defect"
