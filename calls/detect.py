@@ -405,6 +405,7 @@ def scan_for_bookings() -> dict:
                             when_text=booking["when_text"],
                             join_url=booking["join_url"],
                             subject=booking["subject"],
+                            notes=booking.get("notes", ""),
                             origin="inbound",
                             status="cancelled",
                             notified=True,
@@ -434,6 +435,7 @@ def scan_for_bookings() -> dict:
                         when_text=booking["when_text"],
                         join_url=booking["join_url"],
                         subject=booking["subject"],
+                        notes=booking.get("notes", ""),
                         origin=origin,
                         lead_id=lead.id if lead is not None else None,
                         status="booked",
@@ -487,6 +489,12 @@ def _fill_in_gaps(row, booking: dict) -> bool:
         material = True
     if not row.invitee_email and booking.get("invitee_email"):
         row.invitee_email = booking["invitee_email"]
+        material = True
+    # Material by a distance: the note is the invitee stating their own purpose, and a
+    # briefing that went out saying "unknown, ask them" while the answer sat unparsed in the
+    # mail is the exact failure this backfill exists for.
+    if not (row.notes or "") and booking.get("notes"):
+        row.notes = booking["notes"]
         material = True
     # Cosmetic: a better name is worth storing but is not worth a second email.
     if booking.get("invitee_name") and row.invitee_name in ("", "(unknown)"):

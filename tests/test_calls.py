@@ -980,3 +980,157 @@ def test_the_unparsed_time_diagnostic_never_logs_a_person(monkeypatch, temp_db, 
     assert "Sometime on the 3rd" in logged
     assert "senthil.govindarajan@gmail.com" not in logged
     assert "app.cal.com/video" not in logged
+
+
+# ---------------------------------------------------------------------------
+# The invitee's own words. cal.com renders "Additional notes" for the free-text field and
+# renders each custom booking question as its own heading — so the answer to "What do you
+# want help with?" arrives in this mail. Until now those headings existed only in
+# _LABEL_WORDS, so nothing read what sat underneath them: the briefing said "purpose
+# unknown, ask them" while the purpose was three lines further down.
+# ---------------------------------------------------------------------------
+NOTES_BODY = REAL_BOOKING_BODY.replace(
+    "Where\nCal Video",
+    "Additional notes\n"
+    "We are getting prompt-injected through our support bot and I need someone who has\n"
+    "actually shipped guardrails. Can you look at our setup?\n"
+    "Where\nCal Video",
+)
+
+QUESTION_BODY = REAL_BOOKING_BODY.replace(
+    "Where\nCal Video",
+    "What do you want help with?\nKubernetes cost blowout on EKS\n"
+    "How did you find me?\nYour LinkedIn post about guardrails\n"
+    "Where\nCal Video",
+)
+
+
+def test_the_note_the_invitee_typed_is_parsed():
+    booking = _parse(body=NOTES_BODY)
+    assert "prompt-injected" in booking["notes"]
+    assert "Can you look at our setup?" in booking["notes"]
+    # It stops at the next section: "Cal Video" belongs to Where, not to the note.
+    assert "Cal Video" not in booking["notes"]
+
+
+def test_a_custom_booking_question_is_quoted_with_its_question():
+    """The answer alone is meaningless — "LinkedIn" answers nothing without the question."""
+    notes = _parse(body=QUESTION_BODY)["notes"]
+    assert "What do you want help with? Kubernetes cost blowout on EKS" in notes
+    assert "How did you find me? Your LinkedIn post about guardrails" in notes
+
+
+def test_calcoms_own_footer_question_is_not_read_as_a_reason(caplog):
+    """"Need to make a change?" is a heading phrased as a question, and it is cal.com's.
+
+    Without the deny-list the briefing would quote "Need to make a change? Reschedule
+    Cancel" back at the owner as the reason a stranger booked a call — a field populated for
+    a reason unrelated to the data it claims to hold.
+    """
+    body = REAL_BOOKING_BODY + "\nNeed to make a change?\nReschedule\nCancel\n"
+    assert _parse(body=body)["notes"] == ""
+
+
+def test_a_booking_with_no_note_reports_no_note_rather_than_guessing():
+    assert _parse(body=REAL_BOOKING_BODY)["notes"] == ""
+    assert _parse(body=HTML_BOOKING_BODY)["notes"] == ""
+
+
+def test_notes_survive_html_and_are_bounded():
+    body = HTML_BOOKING_BODY.replace(
+        "<tr><td><p><strong>Where</strong></p>",
+        "<tr><td><p><strong>Additional notes</strong></p>"
+        "<p>" + ("scaling pains " * 200) + "</p></td></tr>"
+        "<tr><td><p><strong>Where</strong></p>",
+    )
+    notes = _parse(body=body)["notes"]
+    assert notes.startswith("scaling pains")
+    # It goes into an email, so it is capped rather than trusted.
+    assert len(notes) <= 600
+
+
+def test_the_briefing_leads_with_their_words_and_stops_telling_you_to_ask():
+    """A briefing that says "ask them why" about someone who already wrote it down reads as
+    a briefing nobody read. The quote outranks every inference in the module."""
+    booking = _parse(body=NOTES_BODY)
+    subject, body = brief_mod.build_brief(booking=booking, origin="inbound")
+    assert "in their own words" in body
+    assert "prompt-injected" in body
+    assert "WHY THEY BOOKED — unknown" not in body
+    # The four-possibilities triage exists to recover from not knowing.
+    assert "A recruiter or agency sourcing" not in body
+    # And the plan opens by going deeper, not by asking what they already answered.
+    assert "I read your note" in body
+    assert body.index("prompt-injected") < body.index("HOW TO HANDLE IT")
+
+
+def test_the_briefing_still_admits_ignorance_when_there_is_no_note():
+    booking = _parse(body=REAL_BOOKING_BODY)
+    _, body = brief_mod.build_brief(booking=booking, origin="inbound")
+    assert "WHY THEY BOOKED — unknown" in body
+    assert "in their own words" not in body
+
+
+def test_a_note_is_stored_and_backfilled_but_never_printed_by_the_cli(
+    monkeypatch, temp_db, sent, capsys
+):
+    """Stored for the briefing, withheld from `--list`: that CLI runs in a PUBLIC log.
+
+    The words are a stranger's own account of their business. The email is the private
+    channel; the log gets "a note exists", which is the part that is actionable anyway.
+    """
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    _fake_inbox(monkeypatch, [_real_message(body=NOTES_BODY)])
+    assert detect_mod.scan_for_bookings()["booked"] == 1
+
+    with dbsession.get_session() as s:
+        assert "prompt-injected" in s.query(CallRecord).one().notes
+    assert "prompt-injected" in sent[-1][1]
+
+    import main
+
+    main._list_calls()
+    printed = capsys.readouterr().out
+    assert "prompt-injected" not in printed
+    assert "note   : yes" in printed
+
+
+def test_a_note_that_only_parses_later_is_backfilled_and_rebriefed(monkeypatch, temp_db, sent):
+    """The row predates the parser that can read notes; the owner was told "unknown"."""
+    monkeypatch.setenv("COPILOT_OWNER_EMAIL", OWNER_EMAIL)
+    with dbsession.get_session() as s:
+        s.add(
+            CallRecord(
+                booking_uid="gwFiJkXTZGJToYpdXVFoPB",
+                invitee_name="Senthil Govindarajan",
+                invitee_email="senthil.govindarajan@gmail.com",
+                when_text="Friday, August 21, 2026 4:00pm - 4:15pm (Atlantic/Reykjavik)",
+                join_url="https://app.cal.com/video/gwFiJkXTZGJToYpdXVFoPB",
+                notes="",
+                origin="inbound",
+                status="booked",
+                notified=True,
+            )
+        )
+    _fake_inbox(monkeypatch, [_real_message(body=NOTES_BODY)])
+    stats = detect_mod.scan_for_bookings()
+    assert stats["already_known"] == 1
+    assert stats["briefed"] == 1
+    assert "prompt-injected" in sent[-1][1]
+    # And it does not re-send every two hours thereafter.
+    assert detect_mod.scan_for_bookings()["briefed"] == 0
+
+
+def test_a_note_containing_its_own_question_is_not_cut_in_half():
+    """The discriminator, pinned. "…Can you look at our setup?" is a sentence, not a heading.
+
+    Treating every short "?" line as the next custom question truncated the note at the
+    invitee's own question mark — losing the half that said what they wanted. A question
+    heading is followed by its answer; a closing sentence is followed by the next section.
+    """
+    body = REAL_BOOKING_BODY.replace(
+        "Where\nCal Video",
+        "Additional notes\nOur RAG pipeline leaks PII.\nCan you review it?\nWhere\nCal Video",
+    )
+    notes = _parse(body=body)["notes"]
+    assert notes == "Our RAG pipeline leaks PII. Can you review it?"

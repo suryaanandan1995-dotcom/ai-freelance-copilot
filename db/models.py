@@ -202,6 +202,13 @@ class CallRecord(Base):
     when_text: Mapped[str] = mapped_column(String(256), default="")
     join_url: Mapped[str] = mapped_column(String(512), default="")
     subject: Mapped[str] = mapped_column(String(512), default="")
+    # What the invitee typed when booking — the free-text "Additional notes" field plus the
+    # answer to any booking question the owner has configured. The ONLY direct evidence of
+    # purpose that exists: for an inbound booking from a personal mailbox there is otherwise
+    # nothing to research, and the first briefing this system ever sent had to say "purpose
+    # unknown, ask them". Stored, never printed by ``calls --list``: the CLI runs in a public
+    # Actions log and these are a stranger's own words about their business.
+    notes: Mapped[str] = mapped_column(Text, default="")
     # "outreach" when the invitee is someone we cold-emailed, "inbound" otherwise. The
     # distinction changes the whole briefing: for outreach we know the job, the pitch and
     # the company; for inbound we know nothing and the call has to open with a question.

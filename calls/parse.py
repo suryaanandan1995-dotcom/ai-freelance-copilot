@@ -138,6 +138,52 @@ _TIME_ANYWHERE_RE = re.compile(r"\b\d{1,2}[:.]\d{2}\s*(?:am|pm)?\b", re.IGNORECA
 #: Strips the "When" heading when the heading and the value share a line ("When: ...").
 _WHEN_LABEL_RE = re.compile(r"^(?:when|date(?:\s*&\s*time)?|time)\s*[:\-–]\s*", re.IGNORECASE)
 
+#: Headings whose content is the invitee telling you, in their own words, why they booked.
+#: cal.com renders "Additional notes" for the free-text field and renders each custom
+#: booking question as its own heading — so the answer to "What do you want help with?"
+#: arrives in this email and was, until now, thrown away: these words were in
+#: ``_LABEL_WORDS`` purely so they would not be mistaken for a person's name, and nothing
+#: ever read what sat underneath them. The briefing said "purpose: unknown" while the
+#: purpose was three lines further down the mail.
+_NOTE_HEADINGS = frozenset(
+    {
+        "additional notes",
+        "notes",
+        "your notes",
+        "description",
+        "message",
+        "reason",
+        "agenda",
+    }
+)
+#: Headings that end the note, because their content belongs to a different section.
+_STRUCTURAL_HEADINGS = frozenset(
+    {
+        "what",
+        "when",
+        "who",
+        "where",
+        "why",
+        "event type",
+        "invitee",
+        "attendees",
+        "location",
+        "cal.com",
+        "need to make a change?",
+    }
+)
+#: cal.com's own footer heading is phrased as a question, and a custom booking question is
+#: too. Without this the briefing would quote "Need to make a change?: Reschedule Cancel"
+#: back at the owner as the reason someone booked a call.
+_NOT_A_QUESTION_HEADING = frozenset(
+    {
+        "need to make a change?",
+        "need to reschedule?",
+        "want to add more time?",
+        "questions?",
+    }
+)
+
 #: Phrases that mean "a booking now exists" and "a booking no longer exists". Matched
 #: case-insensitively against subject + body. A cancellation that briefed as a booking
 #: would send the owner to a dead call, so the two are never conflated.
@@ -321,6 +367,88 @@ def _when_text(body: str) -> str:
     return partial
 
 
+def _is_note_heading(line: str) -> str:
+    """The heading text when ``line`` introduces free text from the invitee, else "".
+
+    Two forms are accepted: a known label ("Additional notes"), and *any* short line ending
+    in a question mark, because cal.com renders a custom booking question verbatim as its
+    own heading and there is no way to enumerate questions the owner has not written yet.
+    """
+    stripped = line.strip().rstrip(":").strip()
+    low = stripped.lower()
+    if low in _NOTE_HEADINGS:
+        return stripped
+    if stripped.endswith("?") and len(stripped) <= 80 and low not in _NOT_A_QUESTION_HEADING:
+        return stripped
+    return ""
+
+
+def _followed_by_an_answer(lines: list[str], index: int) -> bool:
+    """True when the line after ``index`` could be an answer to a question on it.
+
+    The one signal that tells a custom-question heading apart from a question the invitee
+    happened to write inside their note. Not infallible — a note ending in a question and
+    continuing into another paragraph reads as a heading — but the failure is then a
+    question mark in the middle of a quote, not a note cut in half.
+    """
+    if index + 1 >= len(lines):
+        return False
+    nxt = lines[index + 1].strip()
+    low = nxt.lower().rstrip(":").strip()
+    return bool(nxt) and low not in _STRUCTURAL_HEADINGS and not nxt.endswith("?")
+
+
+def _notes_text(body: str, limit: int = 600) -> str:
+    """What the invitee typed when booking: notes plus any custom question answers.
+
+    Reading this is the difference between "WHY THEY BOOKED — unknown, ask them" and the
+    person's own sentence. Bounded at ``limit`` characters because it goes into an email,
+    and stopped at the next heading, at any address and at any URL — the notes section is
+    free text, and free text is the one place where continuing to read greedily would
+    swallow the whole footer.
+    """
+    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
+    collected: list[str] = []
+    index = 0
+    while index < len(lines):
+        heading = _is_note_heading(lines[index])
+        if not heading:
+            index += 1
+            continue
+        value: list[str] = []
+        index += 1
+        while index < len(lines):
+            nxt = lines[index]
+            low = nxt.lower().rstrip(":").strip()
+            if low in _STRUCTURAL_HEADINGS or low in _NOTE_HEADINGS:
+                break
+            # A "?" line is ambiguous once we are already inside free text: it is either the
+            # next custom question, or the invitee's own sentence ("…Can you look at our
+            # setup?"). What separates them is what comes NEXT — a question heading is
+            # followed by its answer, while a sentence is the end of the note and is
+            # followed by the next section. Guessing wrong truncated the note mid-thought.
+            if value and _is_note_heading(nxt) and _followed_by_an_answer(lines, index):
+                break
+            if "@" in nxt or "http" in nxt.lower():
+                break
+            value.append(nxt)
+            index += 1
+            if len(" ".join(value)) >= limit:
+                break
+        text = " ".join(value).strip()
+        if not text:
+            continue
+        # A question is quoted with its question, because the answer alone ("LinkedIn") is
+        # meaningless without knowing what was asked.
+        collected.append(f"{heading} {text}" if heading.endswith("?") else text)
+    return "\n".join(collected)[:limit].strip()
+
+
+def notes_text(body: str) -> str:
+    """Public form of :func:`_notes_text`, taking raw mail (HTML or plain)."""
+    return _notes_text(visible_text(body))
+
+
 def when_text(body: str) -> str:
     """The date+time found in ``body``, markup or not. "" when there is none.
 
@@ -341,7 +469,9 @@ def parse_booking(
     """A booking dict, or ``None`` when this mail is not a cal.com booking notice.
 
     Returns ``kind`` ("booked" / "cancelled" / "rescheduled"), ``booking_uid``,
-    ``invitee_name``, ``invitee_email``, ``when_text``, ``join_url`` and ``subject``.
+    ``invitee_name``, ``invitee_email``, ``when_text``, ``join_url``, ``subject`` and
+    ``notes`` — whatever the invitee typed, which is the only direct evidence of purpose
+    this pipeline can ever get.
     """
     # Every heuristic below is line-anchored, and the real confirmation is HTML-only, so
     # this normalisation is what makes them apply at all.
@@ -389,6 +519,9 @@ def parse_booking(
         "when_text": when_text[:256],
         "join_url": (join.group(0) if join else "")[:512],
         "subject": (subject or "").strip()[:512],
+        # What they typed when booking. Usually "" — cal.com renders this section only when
+        # the invitee wrote something, or when the owner has added a booking question.
+        "notes": _notes_text(body),
     }
 
 
