@@ -127,9 +127,26 @@ def run_reply_pass(limit: int = 20, chat=None) -> dict:
         "skipped": 0,
         "capped": 0,
         "flagged": 0,
+        "calls_booked": 0,
+        "calls_briefed": 0,
     }
 
     settings = get_settings()
+
+    # Booked calls first, and OUTSIDE both reply gates. cal.com mail is not a reply from
+    # a lead — ``fetch_replies`` filters to known senders, so it skips cal.com entirely —
+    # and a booked call is the single most valuable event this pipeline can produce. It
+    # must reach the owner even when replies are fully switched off, which is exactly
+    # what returning early below would prevent.
+    try:
+        from calls.detect import scan_for_bookings
+
+        call_stats = scan_for_bookings()
+        stats["calls_booked"] = call_stats.get("booked", 0)
+        stats["calls_briefed"] = call_stats.get("briefed", 0)
+    except Exception as exc:  # noqa: BLE001 - a booking sweep must never break replies
+        logger.warning("run_reply_pass: call detection failed: %s", exc)
+
     # Two independent halves, deliberately gated separately:
     #   detection (read the inbox, record the inbound, mark the lead replied) — safe,
     #     sends nothing, and is what stops the follow-up sequence;

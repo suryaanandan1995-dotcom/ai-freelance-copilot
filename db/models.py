@@ -175,3 +175,40 @@ class ProposalRecord(Base):
     outcome_at: Mapped[_dt.datetime | None] = mapped_column(DateTime, nullable=True)
 
     lead: Mapped[LeadRecord] = relationship(back_populates="proposals")
+
+
+class CallRecord(Base):
+    """One booked call, detected from the cal.com confirmation email.
+
+    Why this is a table and not a log line: the owner reads email once a day and never
+    opens a UI, so a booked call has to arrive as a briefing email — and a briefing that
+    re-sends itself on every 2-hourly pass is worse than none. ``booking_uid`` (the
+    cal.com video-link id, falling back to the Message-ID) is the idempotency key that
+    makes "alert exactly once" true across restarts and re-reads.
+
+    The cal.com WEBHOOK would carry this data more directly, but it needs a public URL
+    to POST to and the dashboard is deliberately unhosted, so ``call_booked_at`` was
+    never once stamped and the funnel read 0 calls while a call sat in the inbox. The
+    inbox is the one production surface that is already reachable — the reply pass logs
+    into it every two hours — so detection lives there instead.
+    """
+
+    __tablename__ = "calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    booking_uid: Mapped[str] = mapped_column(String(256), unique=True, index=True)
+    invitee_name: Mapped[str] = mapped_column(String(256), default="")
+    invitee_email: Mapped[str] = mapped_column(String(320), default="", index=True)
+    when_text: Mapped[str] = mapped_column(String(256), default="")
+    join_url: Mapped[str] = mapped_column(String(512), default="")
+    subject: Mapped[str] = mapped_column(String(512), default="")
+    # "outreach" when the invitee is someone we cold-emailed, "inbound" otherwise. The
+    # distinction changes the whole briefing: for outreach we know the job, the pitch and
+    # the company; for inbound we know nothing and the call has to open with a question.
+    origin: Mapped[str] = mapped_column(String(32), default="inbound")
+    lead_id: Mapped[int | None] = mapped_column(
+        ForeignKey("leads.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="booked")  # booked | cancelled
+    notified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[_dt.datetime] = mapped_column(DateTime, default=_utcnow, index=True)

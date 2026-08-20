@@ -127,6 +127,21 @@ def test_run_reply_pass_noop_when_both_gates_off(temp_db, monkeypatch):
         "reply.inbox.fetch_replies",
         lambda limit=20: (_ for _ in ()).throw(AssertionError("should not fetch")),
     )
+    # Booked-call detection is a THIRD, separately gated half and deliberately runs even
+    # here (cal.com mail is not a prospect reply, and a booked call is the most valuable
+    # event this pipeline produces). Stubbed to zeros so this test still asserts "the
+    # reply halves did nothing" rather than accidentally hitting IMAP.
+    monkeypatch.setattr(
+        "calls.detect.scan_for_bookings",
+        lambda: {
+            "scanned": 0,
+            "booked": 0,
+            "cancelled": 0,
+            "briefed": 0,
+            "already_known": 0,
+            "errors": 0,
+        },
+    )
 
     stats = runner.run_reply_pass()
     assert stats == {
@@ -140,6 +155,8 @@ def test_run_reply_pass_noop_when_both_gates_off(temp_db, monkeypatch):
         "skipped": 0,
         "capped": 0,
         "flagged": 0,
+        "calls_booked": 0,
+        "calls_briefed": 0,
     }
 
 

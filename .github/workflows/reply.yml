@@ -57,5 +57,9 @@ jobs:
         # psycopg2-binary so a Postgres COPILOT_DATABASE_URL works; harmless on SQLite.
         run: pip install -r requirements.txt psycopg2-binary
 
-      - name: Run auto-reply pass
+      # Also sweeps the inbox for cal.com booking confirmations and emails the owner a
+      # briefing (who booked / why / how to run the 15 minutes). That runs before — and
+      # independently of — the reply gates, so a booked call is reported even with
+      # auto-reply and reply detection both switched off.
+      - name: Run auto-reply pass (also detects booked calls)
         run: python main.py reply

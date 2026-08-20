@@ -309,6 +309,28 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_calls(_args: argparse.Namespace) -> int:
+    """Sweep the inbox for cal.com bookings and email the owner a briefing for each.
+
+    Runs inside the reply pass too; it exists as its own command so the daily monitor can
+    also call it. A booking made on a Saturday would otherwise wait until Monday's reply
+    schedule, and a call on Monday morning is exactly the one that needs the briefing.
+    """
+    from calls.detect import scan_for_bookings
+
+    stats = scan_for_bookings()
+    print(
+        "calls: scanned={scanned} booked={booked} cancelled={cancelled} "
+        "briefed={briefed} already_known={already_known} errors={errors}".format(**stats)
+    )
+    # Deliberately no addresses in the output: Actions logs on a public repo are public.
+    if stats["booked"] and not stats["briefed"]:
+        # The row exists but the owner was not told, which is the only failure mode that
+        # matters here — say so loudly instead of exiting 0 on a silent success.
+        print("calls: WARNING a booking was detected but no briefing was sent (SMTP?)")
+    return 0
+
+
 def _cmd_doctor(_args: argparse.Namespace) -> int:
     from monitor.doctor import format_report, run_healthcheck
     from runlog import record_run
@@ -403,6 +425,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_reply.set_defaults(func=_cmd_reply)
+
+    p_calls = sub.add_parser(
+        "calls",
+        help="Detect cal.com bookings in the inbox and email a briefing for each.",
+        description=(
+            "The cal.com webhook needs a public host and has therefore never fired, so "
+            "booked calls were invisible: the funnel showed 0 booked while a real call "
+            "sat unread. This reads the confirmation email instead, stamps "
+            "call_booked_at, and emails who booked, why they probably booked and how to "
+            "run the 15 minutes. Read-only against mail; one briefing per booking."
+        ),
+    )
+    p_calls.set_defaults(func=_cmd_calls)
 
     p_followup = sub.add_parser(
         "followup",

@@ -250,6 +250,16 @@ class Settings(BaseSettings):
     # forever — indistinguishable from a pitch nobody wants. Detection is safe to leave
     # on because it sends nothing; it only needs IMAP credentials.
     reply_detection: bool = True
+    # Detect booked calls from cal.com's confirmation emails and send the owner a
+    # briefing (who booked, why they probably booked, how to run the 15 minutes).
+    #
+    # This is the inbox-side replacement for ``POST /webhooks/cal``, which is correct,
+    # tested, and has never fired once: a webhook needs a publicly reachable dashboard
+    # and hosting one was declined. So ``call_booked_at`` was never stamped, every KPI
+    # report showed **0 calls booked**, and on 2026-08-20 a real booking sat unremarked
+    # in the inbox while the pipeline reported nothing had happened. Reads mail and
+    # emails the owner; sends nothing to prospects, so it is safe on by default.
+    detect_calls: bool = True
     # Blank means "derive it from smtp_host" — see :meth:`resolved_imap_host`. It is
     # deliberately NOT defaulted to a concrete provider: this field used to read
     # ``imap.gmail.com`` while the login credentials come from the *SMTP* settings, so
