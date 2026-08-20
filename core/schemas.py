@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Lead(BaseModel):
@@ -50,6 +50,40 @@ class FitVerdict(BaseModel):
     matched_projects: list[str] = Field(
         default_factory=list, description="Portfolio repo names that prove fit"
     )
+
+    @field_validator("reasons", "matched_projects", mode="before")
+    @classmethod
+    def _coerce_list(cls, value):
+        """Accept a JSON-encoded list where a list was asked for.
+
+        Narrowing the schema stopped the crash but not the underlying habit: on
+        2026-08-20 the run failed again on ``reasons``, with
+        ``input_value='["Core requirement is Sc...qualifier on its own."]'`` — the right
+        content, serialized one layer too many. That is not a model that misunderstood
+        the task; it is a model that stringified a field, and rejecting it throws away a
+        perfectly good judgement over an encoding detail.
+
+        So the boundary decodes instead of refusing. A lenient *parser* at the edge and
+        a strict *type* inside is the standard shape; the alternative is one lost lead
+        per run forever, each costing a Sonnet call that already succeeded.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("["):
+                import json
+
+                try:
+                    decoded = json.loads(text)
+                except ValueError:
+                    return [text]  # looked like JSON, wasn't: keep the prose
+                if isinstance(decoded, list):
+                    return [str(item) for item in decoded]
+                return [str(decoded)]
+            # One reason given as a bare sentence: a real answer, not a malformed list.
+            return [text] if text else []
+        return value
 
 
 class ScoredLead(BaseModel):
